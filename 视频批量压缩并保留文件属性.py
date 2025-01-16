@@ -148,6 +148,8 @@ class VideoCompressThread(QThread):
                     '-b:v', str(appropriate_bitrate),
                     '-progress', 'pipe:1',  # 输出进度到管道
                     '-nostats',  # 禁用默认统计信息
+                    '-loglevel', 'error',  # 只显示错误信息
+                    '-y',  # 自动覆盖
                     output_video_path
                 ]
                 creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
@@ -155,14 +157,33 @@ class VideoCompressThread(QThread):
                     command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    universal_newlines=True,  # 使用文本模式
-                    creationflags=creation_flags
+                    stdin=subprocess.DEVNULL,  # 添加这行
+                    universal_newlines=True,
+                    creationflags=creation_flags,
+                    bufsize=1  # 添加这行，设置行缓冲
                 )
 
                 # 读取进度信息
+                last_progress_time = time.time()
                 while self.current_process.poll() is None and self.is_running:
+                    # 使用select来实现非阻塞读取
+                    if platform.system() != 'Windows':
+                        import select
+                        reads, _, _ = select.select([self.current_process.stdout], [], [], 0.1)
+                        if not reads:
+                            # 检查是否超过30秒没有进度更新
+                            if time.time() - last_progress_time > 30:
+                                print("压缩进程可能已经卡住，正在终止...")
+                                self.current_process.terminate()
+                                break
+                            continue
+                    
                     line = self.current_process.stdout.readline()
+                    if not line and self.current_process.poll() is not None:
+                        break
+                    
                     if line:
+                        last_progress_time = time.time()
                         if 'out_time_ms=' in line:
                             try:
                                 # 处理 'N/A' 的情况
@@ -179,6 +200,19 @@ class VideoCompressThread(QThread):
                             except (ValueError, IndexError) as e:
                                 print(f"解析进度信息失败：{e}")
                                 continue
+
+                # 检查进程是否正常结束
+                return_code = self.current_process.poll()
+                if return_code is None:
+                    self.current_process.terminate()
+                    print("压缩进程被终止")
+                    return
+                elif return_code != 0:
+                    stderr_output = self.current_process.stderr.read()
+                    print(f"压缩失败，错误码：{return_code}，错误信息：{stderr_output}")
+                    progress_data.update({"status": "压缩失败"})
+                    self.progress_signal.emit(progress_data)
+                    return
 
                 if not self.is_running:
                     if os.path.exists(output_video_path):
@@ -324,14 +358,19 @@ class VideoCompressThread(QThread):
     def copy_video_metadata(self, input_path, output_path):
         """复制视频的元数据信息"""
         try:
-            # 使用ffmpeg复制元数据
+            # 使用ffmpeg复制所有元数据和流信息，但排除可能导致问题的数据流
             command = [
                 'ffmpeg', '-i', input_path,  # 输入为原始文件
                 '-i', output_path,  # 压缩后的文件
                 '-map', '1:v',  # 使用第二个输入的视频流（压缩后的）
-                '-map_metadata', '0',  # 使用第一个输入的元数据（原始的）
+                '-map', '1:a?',  # 复制所有音频流（如果存在）
+                '-map', '0:s?',  # 从原始文件复制字幕流（如果存在）
+                '-map_metadata', '0',  # 使用第一个输入的元数据
+                '-metadata', f'creation_time={time.strftime("%Y-%m-%dT%H:%M:%S.000000Z")}',  # 保持创建时间
+                '-movflags', '+faststart+use_metadata_tags',  # 优化元数据处理
                 '-c', 'copy',  # 仅复制，不重新编码
                 '-y',  # 覆盖输出文件
+                '-ignore_unknown',  # 忽略未知流
                 f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"  # 临时文件
             ]
             
@@ -339,7 +378,8 @@ class VideoCompressThread(QThread):
             result = subprocess.run(command, capture_output=True, text=True)
             if result.returncode != 0:
                 print(f"ffmpeg命令执行失败：{result.stderr}")
-                return False
+                # 尝试使用更简单的方式重试
+                return self.simple_copy_metadata(input_path, output_path)
             
             # 替换原文件
             try:
@@ -351,9 +391,8 @@ class VideoCompressThread(QThread):
                 
                 os.rename(temp_path, output_path)
                 
-                # 复制文件时间属性
-                stats = os.stat(input_path)
-                os.utime(output_path, (stats.st_atime, stats.st_mtime))
+                # 复制文件时间属性和其他文件系统属性
+                shutil.copystat(input_path, output_path)
                 
                 return True
             except Exception as e:
@@ -362,7 +401,7 @@ class VideoCompressThread(QThread):
                 
         except Exception as e:
             print(f"复制元数据失败：{e}")
-            return False
+            return self.simple_copy_metadata(input_path, output_path)
         finally:
             # 清理可能存在的临时文件
             try:
@@ -371,6 +410,34 @@ class VideoCompressThread(QThread):
                     os.remove(temp_path)
             except Exception as e:
                 print(f"清理临时文件失败：{e}")
+
+    def simple_copy_metadata(self, input_path, output_path):
+        """使用更简单的方式复制元数据（作为备选方案）"""
+        try:
+            command = [
+                'ffmpeg', '-i', input_path,
+                '-i', output_path,
+                '-map', '1:v',
+                '-map', '1:a?',
+                '-map_metadata', '0',
+                '-c', 'copy',
+                '-y',
+                f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"
+            ]
+            
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode == 0:
+                temp_path = f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"
+                if platform.system() == 'Windows' and os.path.exists(output_path):
+                    os.remove(output_path)
+                os.rename(temp_path, output_path)
+                shutil.copystat(input_path, output_path)
+                return True
+                
+            return False
+        except Exception as e:
+            print(f"简单复制元数据失败：{e}")
+            return False
 
 class ThumbnailLoader(QThread):
     thumbnail_ready = pyqtSignal(object, QPixmap)
