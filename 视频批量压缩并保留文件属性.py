@@ -7,7 +7,8 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout
                             QHBoxLayout, QWidget, QFileDialog, QTableWidget, 
                             QTableWidgetItem, QLabel, QCheckBox, QHeaderView,
                             QDoubleSpinBox)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QByteArray
+from PyQt6.QtGui import QPixmap
 import platform
 
 
@@ -371,12 +372,38 @@ class VideoCompressThread(QThread):
             except Exception as e:
                 print(f"清理临时文件失败：{e}")
 
-def format_size(size_in_bytes):
-    """将字节大小转换为适当的单位（MB或GB）"""
-    size_in_mb = size_in_bytes / (1024 * 1024)
-    if size_in_mb >= 1024:
-        return f"{size_in_mb/1024:.2f} GB"
-    return f"{size_in_mb:.2f} MB"
+class ThumbnailLoader(QThread):
+    thumbnail_ready = pyqtSignal(int, QPixmap)
+    
+    def __init__(self, file_path, row):
+        super().__init__()
+        self.file_path = file_path
+        self.row = row
+        
+    def run(self):
+        try:
+            # 使用ffmpeg提取视频第一帧作为缩略图
+            command = [
+                'ffmpeg',
+                '-i', self.file_path,
+                '-vf', 'scale=120:-1',  # 设置宽度为120，高度自适应
+                '-frames:v', '1',
+                '-f', 'image2pipe',
+                '-vcodec', 'png',
+                '-'
+            ]
+            
+            result = subprocess.run(command, capture_output=True)
+            if result.returncode == 0:
+                image_data = QByteArray(result.stdout)
+                pixmap = QPixmap()
+                if pixmap.loadFromData(image_data):
+                    # 确保高度不超过67
+                    if pixmap.height() > 67:
+                        pixmap = pixmap.scaledToHeight(67, Qt.TransformationMode.SmoothTransformation)
+                    self.thumbnail_ready.emit(self.row, pixmap)
+        except Exception as e:
+            print(f"生成缩略图失败：{e}")
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -424,13 +451,29 @@ class MainWindow(QMainWindow):
 
         # 表格
         self.table = QTableWidget()
-        self.table.setColumnCount(9)
+        self.table.setColumnCount(10)  # 增加一列用于缩略图
         self.table.setHorizontalHeaderLabels([
-            "文件名", "时长", "文件大小", "当前比特率",
+            "缩略图", "文件名", "时长", "文件大小", "当前比特率",
             "目标比特率", "压缩后大小", "体积比例", "影响程度", "状态"
         ])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        
+        # 设置缩略图列的宽度和行高
+        self.table.setColumnWidth(0, 120)  # 设置缩略图列宽
+        self.table.verticalHeader().setDefaultSectionSize(70)  # 设置行高
+        
+        # 其他列自适应内容
+        for i in range(1, self.table.columnCount()):
+            self.table.horizontalHeader().setSectionResizeMode(
+                i, QHeaderView.ResizeMode.ResizeToContents
+            )
+        
+        # 设置表格为只读
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.cellDoubleClicked.connect(self.handle_cell_double_click)
         layout.addWidget(self.table)
+        
+        # 存储缩略图加载线程的引用
+        self.thumbnail_threads = []
 
         # 替换源文件选项
         self.replace_source_cb = QCheckBox("压缩后替换源文件")
@@ -577,22 +620,43 @@ class MainWindow(QMainWindow):
         files.sort(key=lambda x: x[1], reverse=True)
 
         self.table.setRowCount(len(files))
+        
+        # 清理旧的缩略图加载线程
+        for thread in self.thumbnail_threads:
+            thread.quit()
+        self.thumbnail_threads.clear()
+
         for i, (file_path, mod_time) in enumerate(files):
-            self.table.setItem(i, 0, QTableWidgetItem(os.path.basename(file_path)))
+            # 创建缩略图占位符
+            placeholder = QTableWidgetItem()
+            placeholder.setFlags(placeholder.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(i, 0, placeholder)
             
-            # 更新文件大小
+            # 启动缩略图加载线程
+            thread = ThumbnailLoader(file_path, i)
+            thread.thumbnail_ready.connect(self.set_thumbnail)
+            self.thumbnail_threads.append(thread)
+            thread.start()
+            
+            # 设置其他列
+            self.table.setItem(i, 1, QTableWidgetItem(os.path.basename(file_path)))
             size_in_bytes = os.path.getsize(file_path)
             formatted_size = format_size(size_in_bytes)
-            self.table.setItem(i, 2, QTableWidgetItem(formatted_size))
+            self.table.setItem(i, 3, QTableWidgetItem(formatted_size))
             
             # 初始化其他列为空
-            self.table.setItem(i, 1, QTableWidgetItem(""))  # 时长
-            self.table.setItem(i, 3, QTableWidgetItem(""))  # 当前比特率
-            self.table.setItem(i, 4, QTableWidgetItem(""))  # 目标比特率
-            self.table.setItem(i, 5, QTableWidgetItem(""))  # 压缩后大小
-            self.table.setItem(i, 6, QTableWidgetItem(""))  # 压缩比例
-            self.table.setItem(i, 7, QTableWidgetItem(""))  # 影响程度
-            self.table.setItem(i, 8, QTableWidgetItem("等待压缩"))  # 状态
+            for col in [2, 4, 5, 6, 7, 8, 9]:
+                self.table.setItem(i, col, QTableWidgetItem(""))
+            self.table.setItem(i, 9, QTableWidgetItem("等待压缩"))
+
+    @pyqtSlot(int, QPixmap)
+    def set_thumbnail(self, row, pixmap):
+        """设置缩略图"""
+        if 0 <= row < self.table.rowCount():
+            label = QLabel()
+            label.setPixmap(pixmap)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setCellWidget(row, 0, label)
 
     def start_compression(self):
         if not self.source_folder:
@@ -625,9 +689,9 @@ class MainWindow(QMainWindow):
             
             # 更新正在压缩的文件状态为"停止压缩"
             for row in range(self.table.rowCount()):
-                status_item = self.table.item(row, 8)
+                status_item = self.table.item(row, 9)
                 if status_item and status_item.text() == "正在压缩":
-                    self.table.setItem(row, 8, QTableWidgetItem("停止压缩"))
+                    self.table.setItem(row, 9, QTableWidgetItem("停止压缩"))
             
             # 停止压缩线程
             self.compress_thread.stop()
@@ -644,44 +708,44 @@ class MainWindow(QMainWindow):
         
         # 如果是错误状态，只更新状态列
         if data.get("error"):
-            self.table.setItem(row, 8, QTableWidgetItem(data["status"]))  # 状态列索引改为8
+            self.table.setItem(row, 9, QTableWidgetItem(data["status"]))  # 状态列索引改为9
             return
         
         # 更新各列信息（所有列索引减1）
         if "duration" in data:
             duration_str = f"{float(data['duration']):.2f} 秒" if data['duration'] != "未知" else "未知"
-            self.table.setItem(row, 1, QTableWidgetItem(duration_str))
+            self.table.setItem(row, 2, QTableWidgetItem(duration_str))
         if "original_size" in data:
-            self.table.setItem(row, 2, QTableWidgetItem(format_size(data["original_size"])))
+            self.table.setItem(row, 3, QTableWidgetItem(format_size(data["original_size"])))
         if "original_bitrate" in data:
-            self.table.setItem(row, 3, QTableWidgetItem(f"{data['original_bitrate']:.2f} Mbps"))
+            self.table.setItem(row, 4, QTableWidgetItem(f"{data['original_bitrate']:.2f} Mbps"))
         if "target_bitrate" in data:
-            self.table.setItem(row, 4, QTableWidgetItem(f"{data['target_bitrate']:.2f} Mbps"))
+            self.table.setItem(row, 5, QTableWidgetItem(f"{data['target_bitrate']:.2f} Mbps"))
         
         # 如果是跳过压缩的情况，清空压缩后的信息列
         if data.get("skip_compression"):
-            self.table.setItem(row, 5, QTableWidgetItem("-"))
             self.table.setItem(row, 6, QTableWidgetItem("-"))
+            self.table.setItem(row, 7, QTableWidgetItem("-"))
         else:
             if "compressed_size" in data:
-                self.table.setItem(row, 5, QTableWidgetItem(format_size(data["compressed_size"])))
+                self.table.setItem(row, 6, QTableWidgetItem(format_size(data["compressed_size"])))
             if "compression_ratio" in data:
-                self.table.setItem(row, 6, QTableWidgetItem(f"{data['compression_ratio']:.2%}"))
+                self.table.setItem(row, 7, QTableWidgetItem(f"{data['compression_ratio']:.2%}"))
         
         # 更新影响程度列
         if "impact_level" in data:
-            self.table.setItem(row, 7, QTableWidgetItem(data["impact_level"]))
+            self.table.setItem(row, 8, QTableWidgetItem(data["impact_level"]))
         
         # 状态列移到最后
-        self.table.setItem(row, 8, QTableWidgetItem(data["status"]))
+        self.table.setItem(row, 9, QTableWidgetItem(data["status"]))
 
     def compression_finished(self):
+        """压缩完成后的处理"""
         self.source_path_button.setEnabled(True)
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
-        # 不再需要重新启用量化系数调整
-        # self.coef_spin.setEnabled(True)
-        self.update_file_list()
+        # 移除文件夹刷新
+        # self.update_file_list()
 
     def closeEvent(self, event):
         """程序关闭时保存设置"""
@@ -764,6 +828,41 @@ class MainWindow(QMainWindow):
         """窗口大小改变时保存尺寸"""
         super().resizeEvent(event)
         self.save_settings()
+
+    def handle_cell_double_click(self, row, column):
+        """处理表格双击事件"""
+        if column in [0, 1]:  # 缩略图列或文件名列
+            file_name = self.table.item(row, 1).text()  # 从文件名列获取文件名
+            file_path = os.path.join(self.source_folder, file_name)
+            if os.path.exists(file_path):
+                self.open_file(file_path)
+        elif column == 6:  # 压缩后大小列
+            file_name = self.table.item(row, 1).text()  # 从文件名列获取文件名
+            base_name = os.path.splitext(file_name)[0]
+            ext = os.path.splitext(file_name)[1]
+            compressed_file = os.path.join(self.source_folder, base_name + "_comp" + ext)
+            if os.path.exists(compressed_file):
+                self.open_file(compressed_file)
+
+    def open_file(self, file_path):
+        """使用系统默认程序打开文件"""
+        try:
+            if platform.system() == 'Windows':
+                os.startfile(file_path)
+            elif platform.system() == 'Darwin':  # macOS
+                subprocess.run(['open', file_path])
+            else:  # Linux
+                subprocess.run(['xdg-open', file_path])
+        except Exception as e:
+            print(f"打开文件失败：{e}")
+
+def format_size(size_in_bytes):
+    """格式化文件大小显示"""
+    for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+        if size_in_bytes < 1024.0:
+            return f"{size_in_bytes:.2f} {unit}"
+        size_in_bytes /= 1024.0
+    return f"{size_in_bytes:.2f} PB"
 
 if __name__ == "__main__":
     app = QApplication([])
