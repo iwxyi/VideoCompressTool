@@ -54,9 +54,14 @@ class VideoCompressThread(QThread):
         self.folder_path = folder_path
         self.target_folder = target_folder
         self.delete_source = delete_source
-        self.quantization_coef = quantization_coef  # 保存量化系数
+        self.quantization_coef = quantization_coef
         self.is_running = True
         self.current_process = None
+
+    def update_quantization_coef(self, new_coef):
+        """更新量化系数"""
+        self.quantization_coef = new_coef
+        print(f"量化系数已更新为：{new_coef}")
 
     def run(self):
         if not os.path.exists(self.target_folder):
@@ -197,11 +202,24 @@ class VideoCompressThread(QThread):
                     ssim = self.calculate_ssim(input_video_path, output_video_path)
                     impact_level = self.get_impact_level(ssim)
                     
-                    # 更新最终结果
+                    # 更新状态为"复制属性"
                     progress_data.update({
-                        "impact_level": impact_level,
-                        "status": "完成"
+                        "status": "复制属性"
                     })
+                    self.progress_signal.emit(progress_data)
+                    
+                    # 复制文件属性
+                    if self.copy_video_metadata(input_video_path, output_video_path):
+                        # 更新最终结果
+                        progress_data.update({
+                            "impact_level": impact_level,
+                            "status": "完成"
+                        })
+                    else:
+                        progress_data.update({
+                            "impact_level": impact_level,
+                            "status": "完成(属性复制失败)"
+                        })
                     self.progress_signal.emit(progress_data)
                     
                     # 完成所有分析后，如果启用了删除源文件选项，再删除源文件
@@ -287,6 +305,57 @@ class VideoCompressThread(QThread):
         else:
             return f"显著 ({ssim_percent})"
 
+    def copy_video_metadata(self, input_path, output_path):
+        """复制视频的元数据信息"""
+        try:
+            # 使用ffmpeg复制元数据
+            command = [
+                'ffmpeg', '-i', input_path,  # 输入为原始文件
+                '-i', output_path,  # 压缩后的文件
+                '-map', '1:v',  # 使用第二个输入的视频流（压缩后的）
+                '-map_metadata', '0',  # 使用第一个输入的元数据（原始的）
+                '-c', 'copy',  # 仅复制，不重新编码
+                '-y',  # 覆盖输出文件
+                f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"  # 临时文件
+            ]
+            
+            # 执行命令
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"ffmpeg命令执行失败：{result.stderr}")
+                return False
+            
+            # 替换原文件
+            try:
+                temp_path = f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"
+                
+                # 在Windows系统中，需要先删除目标文件
+                if platform.system() == 'Windows' and os.path.exists(output_path):
+                    os.remove(output_path)
+                
+                os.rename(temp_path, output_path)
+                
+                # 复制文件时间属性
+                stats = os.stat(input_path)
+                os.utime(output_path, (stats.st_atime, stats.st_mtime))
+                
+                return True
+            except Exception as e:
+                print(f"替换文件失败：{e}")
+                return False
+                
+        except Exception as e:
+            print(f"复制元数据失败：{e}")
+            return False
+        finally:
+            # 清理可能存在的临时文件
+            try:
+                temp_path = f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except Exception as e:
+                print(f"清理临时文件失败：{e}")
+
 def format_size(size_in_bytes):
     """将字节大小转换为适当的单位（MB或GB）"""
     size_in_mb = size_in_bytes / (1024 * 1024)
@@ -318,11 +387,19 @@ class MainWindow(QMainWindow):
         coef_layout = QHBoxLayout()
         coef_label = QLabel("量化系数(0.07-0.15)：")
         self.coef_spin = QDoubleSpinBox()
-        self.coef_spin.setRange(0.07, 0.15)
+        self.coef_spin.setRange(0.01, 1.00)
         self.coef_spin.setSingleStep(0.01)
         self.coef_spin.setDecimals(2)
+        self.coef_spin.setValue(0.12)
+        self.coef_spin.valueChanged.connect(self.on_coef_changed)
+        
+        # 添加警告提示
+        self.coef_warning = QLabel("")
+        self.coef_warning.setStyleSheet("color: red")
+        
         coef_layout.addWidget(coef_label)
         coef_layout.addWidget(self.coef_spin)
+        coef_layout.addWidget(self.coef_warning)
         coef_layout.addStretch()
         layout.addLayout(coef_layout)
 
@@ -331,7 +408,7 @@ class MainWindow(QMainWindow):
         self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
             "文件名", "时长", "文件大小", "当前比特率",
-            "目标比特率", "压缩后大小", "压缩比例", "影响程度", "状态"
+            "目标比特率", "压缩后大小", "体积比例", "影响程度", "状态"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
@@ -429,13 +506,14 @@ class MainWindow(QMainWindow):
         self.source_path_button.setEnabled(False)
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        self.coef_spin.setEnabled(False)  # 压缩时禁用量化系数调整
+        # 不再禁用量化系数调整
+        # self.coef_spin.setEnabled(False)
         
         self.compress_thread = VideoCompressThread(
             self.source_folder, 
             self.source_folder, 
             self.delete_source_cb.isChecked(),
-            self.coef_spin.value()  # 传递量化系数
+            self.coef_spin.value()
         )
         self.compress_thread.progress_signal.connect(self.update_progress)
         self.compress_thread.finished_signal.connect(self.compression_finished)
@@ -447,7 +525,8 @@ class MainWindow(QMainWindow):
             self.source_path_button.setEnabled(True)
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
-            self.coef_spin.setEnabled(True)
+            # 不再需要重新启用量化系数调整
+            # self.coef_spin.setEnabled(True)
             
             # 更新正在压缩的文件状态为"停止压缩"
             for row in range(self.table.rowCount()):
@@ -505,7 +584,8 @@ class MainWindow(QMainWindow):
         self.source_path_button.setEnabled(True)
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
-        self.coef_spin.setEnabled(True)  # 压缩完成后启用量化系数调整
+        # 不再需要重新启用量化系数调整
+        # self.coef_spin.setEnabled(True)
         self.update_file_list()
 
     def closeEvent(self, event):
@@ -539,6 +619,31 @@ class MainWindow(QMainWindow):
                             print(f"已删除临时文件：{temp_file_path}")
                     except Exception as e:
                         print(f"删除临时文件失败：{temp_file_path}, 错误：{e}")
+
+    def on_coef_changed(self, new_value):
+        """处理量化系数变化"""
+        # 更新警告提示
+        if new_value < 0.07 or new_value > 0.15:
+            self.coef_warning.setText("警告：当前值超出推荐范围")
+        else:
+            self.coef_warning.setText("")
+        
+        if hasattr(self, 'compress_thread') and self.compress_thread is not None:
+            self.compress_thread.update_quantization_coef(new_value)
+        
+        # 保存新的设置
+        try:
+            settings = {}
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+            
+            settings['quantization_coef'] = new_value
+            
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"保存设置失败：{e}")
 
 if __name__ == "__main__":
     app = QApplication([])
