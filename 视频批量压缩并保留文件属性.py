@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QByteArray, QSize
 from PyQt6.QtGui import QPixmap
 import platform
+import datetime
 
 
 """
@@ -64,6 +65,37 @@ class VideoCompressThread(QThread):
         self.quantization_coef = new_coef
         print(f"量化系数已更新为：{new_coef}")
 
+    def get_video_creation_time(self, file_path):
+        """获取视频的拍摄时间"""
+        try:
+            command = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-select_streams', 'v:0',
+                '-show_entries', 'format_tags=creation_time',
+                '-of', 'json',
+                file_path
+            ]
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                creation_time = data.get('format', {}).get('tags', {}).get('creation_time')
+                if creation_time:
+                    # 将ISO格式时间转换为时间戳
+                    try:
+                        return datetime.datetime.strptime(creation_time, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
+                    except ValueError:
+                        try:
+                            return datetime.datetime.strptime(creation_time, "%Y-%m-%dT%H:%M:%SZ").timestamp()
+                        except ValueError:
+                            pass
+            
+            # 如果无法获取拍摄时间，则尝试获取文件的修改时间
+            return os.path.getmtime(file_path)
+        except Exception as e:
+            print(f"获取视频创建时间失败：{e}")
+            return os.path.getmtime(file_path)  # 返回文件修改时间作为后备选项
+
     def run(self):
         if not os.path.exists(self.target_folder):
             os.makedirs(self.target_folder)
@@ -71,20 +103,21 @@ class VideoCompressThread(QThread):
         video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
         files_to_process = []
         
-        # 收集所有视频文件及其修改时间
+        # 收集所有视频文件及其拍摄时间和相对路径
         for root, dirs, files in os.walk(self.folder_path):
             for file in files:
                 file_extension = os.path.splitext(file)[1].lower()
                 if file_extension in video_extensions:
                     file_path = os.path.join(root, file)
-                    mod_time = os.path.getmtime(file_path)
-                    files_to_process.append((file_path, mod_time))
+                    rel_path = os.path.relpath(root, self.folder_path)
+                    creation_time = self.get_video_creation_time(file_path)
+                    files_to_process.append((file_path, creation_time, rel_path))
 
-        # 按修改时间排序，最新的文件在前
+        # 按拍摄时间排序，最新的文件在前
         files_to_process.sort(key=lambda x: x[1], reverse=True)
 
         # 处理排序后的文件
-        for file_path, mod_time in files_to_process:
+        for file_path, mod_time, rel_path in files_to_process:
             if not self.is_running:
                 if self.current_process:
                     self.current_process.terminate()
@@ -93,11 +126,17 @@ class VideoCompressThread(QThread):
             file = os.path.basename(file_path)
             input_video_path = file_path
             
-            # 定义输出文件路径
+            # 定义输出文件路径，保持原有目录结构
             file_name_without_extension = os.path.splitext(file)[0]
             file_extension = os.path.splitext(file)[1]
             output_video_name = file_name_without_extension + "_comp" + file_extension
-            output_video_path = os.path.join(self.target_folder, output_video_name)
+            
+            # 创建目标子文件夹（如果不存在）
+            target_subfolder = os.path.join(self.target_folder, rel_path) if rel_path != '.' else self.target_folder
+            if not os.path.exists(target_subfolder):
+                os.makedirs(target_subfolder)
+            
+            output_video_path = os.path.join(target_subfolder, output_video_name)
             
             # 获取原始文件大小
             input_video_size = os.path.getsize(input_video_path)
@@ -146,10 +185,13 @@ class VideoCompressThread(QThread):
                 command = [
                     'ffmpeg', '-i', input_video_path,
                     '-b:v', str(appropriate_bitrate),
+                    '-movflags', '+faststart',  # 添加 faststart 标志以支持流媒体和快速预览
+                    '-tag:v', 'avc1',  # 使用 avc1 标签代替 H264，提高兼容性
                     '-progress', 'pipe:1',  # 输出进度到管道
                     '-nostats',  # 禁用默认统计信息
                     '-loglevel', 'error',  # 只显示错误信息
                     '-y',  # 自动覆盖
+                    '-pix_fmt', 'yuv420p',  # 使用更通用的像素格式
                     output_video_path
                 ]
                 creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
@@ -157,10 +199,10 @@ class VideoCompressThread(QThread):
                     command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    stdin=subprocess.DEVNULL,  # 添加这行
+                    stdin=subprocess.DEVNULL,
                     universal_newlines=True,
                     creationflags=creation_flags,
-                    bufsize=1  # 添加这行，设置行缓冲
+                    bufsize=1
                 )
 
                 # 读取进度信息
