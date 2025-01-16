@@ -1266,8 +1266,6 @@ class MainWindow(QMainWindow):
             self.source_path_button.setEnabled(True)
             self.start_button.setEnabled(True)
             self.stop_button.setEnabled(False)
-            # 不再需要重新启用量化系数调整
-            # self.coef_spin.setEnabled(True)
             
             # 更新正在压缩的文件状态为"停止压缩"
             for row in range(self.tree.topLevelItemCount()):
@@ -1277,6 +1275,10 @@ class MainWindow(QMainWindow):
             
             # 停止压缩线程
             self.compress_thread.stop()
+            
+            # 清理临时文件
+            self.cleanup_temp_files()
+            
             # 不等待线程结束
             self.compress_thread = None
 
@@ -1389,13 +1391,16 @@ class MainWindow(QMainWindow):
 
     def cleanup_temp_files(self):
         """清理所有临时文件"""
-        if not hasattr(self, 'target_folder'):
+        if not hasattr(self, 'source_folder') or not self.source_folder:
             return
-            
+        
         # 查找并删除所有临时文件
         for root, dirs, files in os.walk(self.source_folder):
             for file in files:
-                if "_temp." in file:  # 检查是否是临时文件
+                # 检查是否是临时压缩文件（以_comp结尾的视频文件）
+                name, ext = os.path.splitext(file)
+                if (name.endswith('_comp') and 
+                    ext.lower() in ['.mp4', '.avi', '.mov', '.mkv']):
                     try:
                         temp_file_path = os.path.join(root, file)
                         if os.path.exists(temp_file_path):
