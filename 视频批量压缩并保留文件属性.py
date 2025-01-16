@@ -184,24 +184,39 @@ class VideoCompressThread(QThread):
                     output_video_size = os.path.getsize(output_video_path)
                     end_time = time.time()
                     
-                    # 如果启用了删除源文件选项，删除源文件
-                    if self.delete_source:
-                        try:
-                            os.remove(input_video_path)
-                        except Exception as e:
-                            print(f"删除源文件失败：{e}")
-
-                    # 更新压缩结果
+                    # 更新状态为"计算SSIM"
                     progress_data.update({
                         "compressed_size": output_video_size,
                         "compression_ratio": output_video_size / input_video_size,
                         "time_taken": end_time - start_time,
+                        "status": "计算SSIM"
+                    })
+                    self.progress_signal.emit(progress_data)
+                    
+                    # 计算SSIM并获取带数值的影响程度描述
+                    ssim = self.calculate_ssim(input_video_path, output_video_path)
+                    impact_level = self.get_impact_level(ssim)
+                    
+                    # 更新最终结果
+                    progress_data.update({
+                        "impact_level": impact_level,
                         "status": "完成"
                     })
                     self.progress_signal.emit(progress_data)
+                    
+                    # 完成所有分析后，如果启用了删除源文件选项，再删除源文件
+                    if self.delete_source:
+                        try:
+                            os.remove(input_video_path)
+                            print(f"已删除源文件：{input_video_path}")
+                        except Exception as e:
+                            print(f"删除源文件失败：{e}")
                 else:
                     print(f"压缩失败：{file}")
-                    progress_data.update({"status": "压缩失败"})
+                    progress_data.update({
+                        "status": "压缩失败",
+                        "impact_level": "未知"
+                    })
                     self.progress_signal.emit(progress_data)
 
             except Exception as e:
@@ -227,6 +242,50 @@ class VideoCompressThread(QThread):
                     os.kill(self.current_process.pid, signal.SIGTERM)
             except Exception as e:
                 print(f"终止进程失败：{e}")
+
+    def calculate_ssim(self, original_path, compressed_path):
+        """计算两个视频的SSIM值"""
+        try:
+            # 使用ffmpeg提取一帧进行比较
+            command = [
+                'ffmpeg',
+                '-i', original_path,
+                '-i', compressed_path,
+                '-filter_complex', '[0:v][1:v]ssim',
+                '-f', 'null',
+                '-'
+            ]
+            result = subprocess.run(command, capture_output=True, text=True)
+            
+            # 从输出中提取SSIM值
+            for line in result.stderr.split('\n'):
+                if 'SSIM' in line:
+                    try:
+                        ssim = float(line.split('All:')[1].split('(')[0].strip())
+                        return ssim
+                    except:
+                        return None
+            return None
+        except Exception as e:
+            print(f"计算SSIM失败：{e}")
+            return None
+
+    def get_impact_level(self, ssim):
+        """根据SSIM值返回影响程度描述和具体数值"""
+        if ssim is None:
+            return "未知"
+        
+        # 格式化SSIM值为百分比
+        ssim_percent = f"{ssim * 100:.2f}%"
+        
+        if ssim >= 0.98:
+            return f"极小 ({ssim_percent})"
+        elif ssim >= 0.95:
+            return f"轻微 ({ssim_percent})"
+        elif ssim >= 0.90:
+            return f"中等 ({ssim_percent})"
+        else:
+            return f"显著 ({ssim_percent})"
 
 def format_size(size_in_bytes):
     """将字节大小转换为适当的单位（MB或GB）"""
@@ -269,10 +328,10 @@ class MainWindow(QMainWindow):
 
         # 表格
         self.table = QTableWidget()
-        self.table.setColumnCount(8)
+        self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
             "文件名", "时长", "文件大小", "当前比特率",
-            "目标比特率", "压缩后大小", "压缩比例", "状态"
+            "目标比特率", "压缩后大小", "压缩比例", "影响程度", "状态"
         ])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
@@ -360,7 +419,8 @@ class MainWindow(QMainWindow):
             self.table.setItem(i, 4, QTableWidgetItem(""))  # 目标比特率
             self.table.setItem(i, 5, QTableWidgetItem(""))  # 压缩后大小
             self.table.setItem(i, 6, QTableWidgetItem(""))  # 压缩比例
-            self.table.setItem(i, 7, QTableWidgetItem("等待压缩"))  # 状态
+            self.table.setItem(i, 7, QTableWidgetItem(""))  # 影响程度
+            self.table.setItem(i, 8, QTableWidgetItem("等待压缩"))  # 状态
 
     def start_compression(self):
         if not self.source_folder:
@@ -391,9 +451,9 @@ class MainWindow(QMainWindow):
             
             # 更新正在压缩的文件状态为"停止压缩"
             for row in range(self.table.rowCount()):
-                status_item = self.table.item(row, 7)
+                status_item = self.table.item(row, 8)
                 if status_item and status_item.text() == "正在压缩":
-                    self.table.setItem(row, 7, QTableWidgetItem("停止压缩"))
+                    self.table.setItem(row, 8, QTableWidgetItem("停止压缩"))
             
             # 停止压缩线程
             self.compress_thread.stop()
@@ -410,7 +470,7 @@ class MainWindow(QMainWindow):
         
         # 如果是错误状态，只更新状态列
         if data.get("error"):
-            self.table.setItem(row, 7, QTableWidgetItem(data["status"]))  # 状态列索引改为7
+            self.table.setItem(row, 8, QTableWidgetItem(data["status"]))  # 状态列索引改为8
             return
         
         # 更新各列信息（所有列索引减1）
@@ -434,7 +494,12 @@ class MainWindow(QMainWindow):
             if "compression_ratio" in data:
                 self.table.setItem(row, 6, QTableWidgetItem(f"{data['compression_ratio']:.2%}"))
         
-        self.table.setItem(row, 7, QTableWidgetItem(data["status"]))
+        # 更新影响程度列
+        if "impact_level" in data:
+            self.table.setItem(row, 7, QTableWidgetItem(data["impact_level"]))
+        
+        # 状态列移到最后
+        self.table.setItem(row, 8, QTableWidgetItem(data["status"]))
 
     def compression_finished(self):
         self.source_path_button.setEnabled(True)
