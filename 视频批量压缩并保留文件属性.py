@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout
                             QTreeWidgetItem, QLabel, QCheckBox, QHeaderView,
                             QDoubleSpinBox, QTreeWidgetItemIterator, QStyle)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QByteArray, QSize
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QPixmap, QColor
 import platform
 import datetime
 
@@ -97,221 +97,285 @@ class VideoCompressThread(QThread):
         # 处理收集到的文件
         for file_path, rel_path in files_to_process:
             if not self.is_running:
-                if self.current_process:
-                    self.current_process.terminate()
-                return
+                break
 
-            file = os.path.basename(file_path)
-            input_video_path = file_path
-            
-            # 定义输出文件路径，保持原有目录结构
-            file_name_without_extension = os.path.splitext(file)[0]
-            file_extension = os.path.splitext(file)[1]
-            output_video_name = file_name_without_extension + "_comp" + file_extension
-            
-            # 创建目标子文件夹（如果不存在）
-            target_subfolder = os.path.join(self.target_folder, rel_path) if rel_path != '.' else self.target_folder
-            if not os.path.exists(target_subfolder):
-                os.makedirs(target_subfolder)
-            
-            output_video_path = os.path.join(target_subfolder, output_video_name)
-            
-            # 获取原始文件大小
-            input_video_size = os.path.getsize(input_video_path)
-            start_time = time.time()
-            print(f"正在压缩：{input_video_path}，原文件大小：{input_video_size / 1024 / 1024:.2f}MB")
-            
-            # 获取视频信息并更新表格
-            appropriate_bitrate, duration, current_bitrate, frame_rate = estimate_appropriate_bitrate(input_video_path, self.quantization_coef)
-            if appropriate_bitrate == 0:
-                print(f"无法获取视频信息，跳过压缩：{input_video_path}")
-                self.progress_signal.emit({
-                    "file_name": file,
-                    "status": "获取信息失败",
-                    "error": True
-                })
-                continue
-
-            # 检查是否需要压缩
-            # 0.95 是比较合适的，但是 0.94 这种压缩后可能比例也就小 1%，不如多算一点
-            if current_bitrate and appropriate_bitrate >= current_bitrate * 0.9:
-                print(f"无需压缩：{file}，新比特率（{appropriate_bitrate/1024/1024:.2f}Mbps）接近或高于原比特率（{current_bitrate/1024/1024:.2f}Mbps）")
-                self.progress_signal.emit({
-                    "file_name": file,
-                    "duration": f"{duration:.2f}" if duration else "未知",
-                    "original_size": input_video_size,
-                    "original_bitrate": current_bitrate / 1024 / 1024 if current_bitrate else 0,
-                    "target_bitrate": appropriate_bitrate / 1024 / 1024,
-                    "status": "无需压缩",
-                    "skip_compression": True
-                })
-                continue
-
-            # 发送开始压缩信号，更新视频信息
-            progress_data = {
-                "file_name": file,
-                "duration": f"{duration:.2f}" if duration else "未知",
-                "original_size": input_video_size,
-                "original_bitrate": current_bitrate / 1024 / 1024 if current_bitrate else 0,
-                "target_bitrate": appropriate_bitrate / 1024 / 1024,
-                "status": "正在压缩"
-            }
-            self.progress_signal.emit(progress_data)
-
-            # 直接压缩为目标文件
             try:
-                # 添加 -progress pipe:1 参数来输出进度信息
-                command = [
-                    'ffmpeg', '-i', input_video_path,
-                    '-b:v', str(appropriate_bitrate),
-                    '-movflags', '+faststart',  # 添加 faststart 标志以支持流媒体和快速预览
-                    '-tag:v', 'avc1',  # 使用 avc1 标签代替 H264，提高兼容性
-                    '-progress', 'pipe:1',  # 输出进度到管道
-                    '-nostats',  # 禁用默认统计信息
-                    '-loglevel', 'error',  # 只显示错误信息
-                    '-y',  # 自动覆盖
-                    '-pix_fmt', 'yuv420p',  # 使用更通用的像素格式
-                    output_video_path
-                ]
-                creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
-                self.current_process = subprocess.Popen(
-                    command,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    stdin=subprocess.DEVNULL,
-                    universal_newlines=True,
-                    creationflags=creation_flags,
-                    bufsize=1
-                )
+                # 检查文件是否存在
+                if not os.path.exists(file_path):
+                    print(f"文件不存在：{file_path}")
+                    error_info = {
+                        "file_name": os.path.basename(file_path),
+                        "status": "文件不存在",
+                        "error": True,
+                        "compression_time": datetime.datetime.now().isoformat()
+                    }
+                    window = self.parent()
+                    if window:
+                        window.save_compression_history(file_path, error_info)
+                    self.progress_signal.emit(error_info)
+                    continue
 
-                # 读取进度信息
-                last_progress_time = time.time()
-                while self.current_process.poll() is None and self.is_running:
-                    # 使用select来实现非阻塞读取
-                    if platform.system() != 'Windows':
-                        import select
-                        reads, _, _ = select.select([self.current_process.stdout], [], [], 0.1)
-                        if not reads:
-                            # 检查是否超过30秒没有进度更新
-                            if time.time() - last_progress_time > 30:
-                                print("压缩进程可能已经卡住，正在终止...")
-                                self.current_process.terminate()
-                                break
-                            continue
+                try:
+                    file = os.path.basename(file_path)
+                    input_video_path = file_path
                     
-                    line = self.current_process.stdout.readline()
-                    if not line and self.current_process.poll() is not None:
-                        break
+                    # 定义输出文件路径，保持原有目录结构
+                    file_name_without_extension = os.path.splitext(file)[0]
+                    file_extension = os.path.splitext(file)[1]
+                    output_video_name = file_name_without_extension + "_comp" + file_extension
                     
-                    if line:
+                    # 创建目标子文件夹（如果不存在）
+                    target_subfolder = os.path.join(self.target_folder, rel_path) if rel_path != '.' else self.target_folder
+                    if not os.path.exists(target_subfolder):
+                        os.makedirs(target_subfolder)
+                    
+                    output_video_path = os.path.join(target_subfolder, output_video_name)
+                    
+                    # 获取原始文件大小
+                    input_video_size = os.path.getsize(input_video_path)
+                    start_time = time.time()
+                    print(f"正在压缩：{input_video_path}，原文件大小：{input_video_size / 1024 / 1024:.2f}MB")
+                    
+                    # 获取视频信息并更新表格
+                    appropriate_bitrate, duration, current_bitrate, frame_rate = estimate_appropriate_bitrate(input_video_path, self.quantization_coef)
+                    if appropriate_bitrate == 0:
+                        print(f"无法获取视频信息，跳过压缩：{input_video_path}")
+                        self.progress_signal.emit({
+                            "file_name": file,
+                            "status": "获取信息失败",
+                            "error": True
+                        })
+                        continue
+
+                    # 检查是否需要压缩
+                    # 0.95 是比较合适的，但是 0.94 这种压缩后可能比例也就小 1%，不如多算一点
+                    if current_bitrate and appropriate_bitrate >= current_bitrate * 0.9:
+                        print(f"无需压缩：{file}，新比特率（{appropriate_bitrate/1024/1024:.2f}Mbps）接近或高于原比特率（{current_bitrate/1024/1024:.2f}Mbps）")
+                        self.progress_signal.emit({
+                            "file_name": file,
+                            "duration": f"{duration:.2f}" if duration else "未知",
+                            "original_size": input_video_size,
+                            "original_bitrate": current_bitrate / 1024 / 1024 if current_bitrate else 0,
+                            "target_bitrate": appropriate_bitrate / 1024 / 1024,
+                            "status": "无需压缩",
+                            "skip_compression": True
+                        })
+                        continue
+
+                    # 发送开始压缩信号，更新视频信息
+                    progress_data = {
+                        "file_name": file,
+                        "duration": f"{duration:.2f}" if duration else "未知",
+                        "original_size": input_video_size,
+                        "original_bitrate": current_bitrate / 1024 / 1024 if current_bitrate else 0,
+                        "target_bitrate": appropriate_bitrate / 1024 / 1024,
+                        "status": "正在压缩"
+                    }
+                    self.progress_signal.emit(progress_data)
+
+                    # 直接压缩为目标文件
+                    try:
+                        # 添加 -progress pipe:1 参数来输出进度信息
+                        command = [
+                            'ffmpeg', '-i', input_video_path,
+                            '-b:v', str(appropriate_bitrate),
+                            '-movflags', '+faststart',  # 添加 faststart 标志以支持流媒体和快速预览
+                            '-tag:v', 'avc1',  # 使用 avc1 标签代替 H264，提高兼容性
+                            '-progress', 'pipe:1',  # 输出进度到管道
+                            '-nostats',  # 禁用默认统计信息
+                            '-loglevel', 'error',  # 只显示错误信息
+                            '-y',  # 自动覆盖
+                            '-pix_fmt', 'yuv420p',  # 使用更通用的像素格式
+                            output_video_path
+                        ]
+                        creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
+                        self.current_process = subprocess.Popen(
+                            command,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL,
+                            universal_newlines=True,
+                            creationflags=creation_flags,
+                            bufsize=1
+                        )
+
+                        # 读取进度信息
                         last_progress_time = time.time()
-                        if 'out_time_ms=' in line:
-                            try:
-                                # 处理 'N/A' 的情况
-                                time_str = line.split('=')[1].strip()
-                                if time_str != 'N/A':
-                                    time_ms = int(time_str) / 1000000  # 转换为秒
-                                    if duration:
-                                        progress = (time_ms / float(duration)) * 100
-                                        # 更新进度信息
-                                        progress_data.update({
-                                            "status": f"正在压缩 {progress:.1f}%"
-                                        })
-                                        self.progress_signal.emit(progress_data)
-                            except (ValueError, IndexError) as e:
-                                print(f"解析进度信息失败：{e}")
-                                continue
+                        while self.current_process.poll() is None and self.is_running:
+                            # 使用select来实现非阻塞读取
+                            if platform.system() != 'Windows':
+                                import select
+                                reads, _, _ = select.select([self.current_process.stdout], [], [], 0.1)
+                                if not reads:
+                                    # 检查是否超过30秒没有进度更新
+                                    if time.time() - last_progress_time > 30:
+                                        print("压缩进程可能已经卡住，正在终止...")
+                                        self.current_process.terminate()
+                                        break
+                                    continue
+                            
+                            line = self.current_process.stdout.readline()
+                            if not line and self.current_process.poll() is not None:
+                                break
+                            
+                            if line:
+                                last_progress_time = time.time()
+                                if 'out_time_ms=' in line:
+                                    try:
+                                        # 处理 'N/A' 的情况
+                                        time_str = line.split('=')[1].strip()
+                                        if time_str != 'N/A':
+                                            time_ms = int(time_str) / 1000000  # 转换为秒
+                                            if duration:
+                                                progress = (time_ms / float(duration)) * 100
+                                                # 更新进度信息
+                                                progress_data.update({
+                                                    "status": f"正在压缩 {progress:.1f}%"
+                                                })
+                                                self.progress_signal.emit(progress_data)
+                                    except (ValueError, IndexError) as e:
+                                        print(f"解析进度信息失败：{e}")
+                                        continue
 
-                # 检查进程是否正常结束
-                return_code = self.current_process.poll()
-                if return_code is None:
-                    self.current_process.terminate()
-                    print("压缩进程被终止")
-                    return
-                elif return_code != 0:
-                    stderr_output = self.current_process.stderr.read()
-                    print(f"压缩失败，错误码：{return_code}，错误信息：{stderr_output}")
-                    progress_data.update({"status": "压缩失败"})
-                    self.progress_signal.emit(progress_data)
-                    return
+                        # 检查进程是否正常结束
+                        return_code = self.current_process.poll()
+                        if return_code is None:
+                            self.current_process.terminate()
+                            print("压缩进程被终止")
+                            return
+                        elif return_code != 0:
+                            stderr_output = self.current_process.stderr.read()
+                            print(f"压缩失败，错误码：{return_code}，错误信息：{stderr_output}")
+                            progress_data.update({"status": "压缩失败"})
+                            self.progress_signal.emit(progress_data)
+                            return
 
-                if not self.is_running:
-                    if os.path.exists(output_video_path):
-                        os.remove(output_video_path)
-                    return
+                        if not self.is_running:
+                            if os.path.exists(output_video_path):
+                                os.remove(output_video_path)
+                            return
 
-                # 检查压缩结果
-                if os.path.exists(output_video_path):
-                    output_video_size = os.path.getsize(output_video_path)
-                    end_time = time.time()
-                    
-                    # 更新状态为"计算SSIM"
-                    progress_data.update({
-                        "compressed_size": output_video_size,
-                        "compression_ratio": output_video_size / input_video_size,
-                        "time_taken": end_time - start_time,
-                        "status": "计算SSIM"
-                    })
-                    self.progress_signal.emit(progress_data)
-                    
-                    # 计算SSIM并获取带数值的影响程度描述
-                    ssim = self.calculate_ssim(input_video_path, output_video_path)
-                    impact_level = self.get_impact_level(ssim)
-                    
-                    # 更新状态为"复制属性"
-                    progress_data.update({
-                        "status": "复制属性"
-                    })
-                    self.progress_signal.emit(progress_data)
-                    
-                    # 复制文件属性
-                    if self.copy_video_metadata(input_video_path, output_video_path):
-                        # 如果启用了替换源文件选项
-                        if self.delete_source:  # 保持变量名不变，但功能改为替换
-                            try:
-                                # 备份原文件（添加.bak后缀）
-                                backup_path = input_video_path + '.bak'
-                                os.rename(input_video_path, backup_path)
+                        # 检查压缩结果
+                        if os.path.exists(output_video_path):
+                            output_video_size = os.path.getsize(output_video_path)
+                            end_time = time.time()
+                            
+                            # 更新状态为"计算SSIM中"
+                            progress_data.update({
+                                "compressed_size": output_video_size,
+                                "compression_ratio": output_video_size / input_video_size,
+                                "time_taken": end_time - start_time,
+                                "status": "计算SSIM中"
+                            })
+                            self.progress_signal.emit(progress_data)
+                            
+                            # 计算SSIM并获取带数值的影响程度描述
+                            ssim = self.calculate_ssim(input_video_path, output_video_path)
+                            impact_level = self.get_impact_level(ssim)
+
+                            # 保存压缩信息
+                            window = self.parent()
+                            if window:
+                                compression_info = {
+                                    "file_name": os.path.basename(file_path),
+                                    "duration": progress_data.get("duration"),
+                                    "original_size": input_video_size,
+                                    "original_bitrate": current_bitrate / 1024 / 1024 if current_bitrate else 0,
+                                    "target_bitrate": appropriate_bitrate / 1024 / 1024,
+                                    "compressed_size": output_video_size,
+                                    "compression_ratio": output_video_size / input_video_size,
+                                    "impact_level": impact_level,
+                                    "status": "完成",
+                                    "compression_time": datetime.datetime.now().isoformat()
+                                }
+                                window.save_compression_history(file_path, compression_info)
+                            
+                            # 更新状态为"复制属性中"
+                            progress_data.update({
+                                "status": "复制属性中"
+                            })
+                            self.progress_signal.emit(progress_data)
+                            
+                            # 复制文件属性
+                            if self.copy_video_metadata(input_video_path, output_video_path):
+                                # 如果启用了替换源文件选项
+                                if self.delete_source:  # 保持变量名不变，但功能改为替换
+                                    try:
+                                        # 备份原文件（添加.bak后缀）
+                                        backup_path = input_video_path + '.bak'
+                                        os.rename(input_video_path, backup_path)
+                                        
+                                        # 将压缩后的文件移动到源文件位置
+                                        os.rename(output_video_path, input_video_path)
+                                        
+                                        # 删除备份文件
+                                        os.remove(backup_path)
+                                        
+                                        print(f"已替换源文件：{input_video_path}")
+                                    except Exception as e:
+                                        print(f"替换源文件失败：{e}")
+                                        # 如果替换失败，尝试恢复原文件
+                                        try:
+                                            if os.path.exists(backup_path):
+                                                os.rename(backup_path, input_video_path)
+                                        except Exception as e2:
+                                            print(f"恢复原文件失败：{e2}")
                                 
-                                # 将压缩后的文件移动到源文件位置
-                                os.rename(output_video_path, input_video_path)
-                                
-                                # 删除备份文件
-                                os.remove(backup_path)
-                                
-                                print(f"已替换源文件：{input_video_path}")
-                            except Exception as e:
-                                print(f"替换源文件失败：{e}")
-                                # 如果替换失败，尝试恢复原文件
-                                try:
-                                    if os.path.exists(backup_path):
-                                        os.rename(backup_path, input_video_path)
-                                except Exception as e2:
-                                    print(f"恢复原文件失败：{e2}")
-                        
-                        # 更新最终结果
-                        progress_data.update({
-                            "impact_level": impact_level,
-                            "status": "完成"
-                        })
-                    else:
-                        progress_data.update({
-                            "impact_level": impact_level,
-                            "status": "完成(属性复制失败)"
-                        })
-                    self.progress_signal.emit(progress_data)
-                else:
-                    print(f"压缩失败：{file}")
-                    progress_data.update({
-                        "status": "压缩失败",
-                        "impact_level": "未知"
-                    })
-                    self.progress_signal.emit(progress_data)
+                                # 更新最终结果
+                                progress_data.update({
+                                    "impact_level": impact_level,
+                                    "status": "完成"
+                                })
+                            else:
+                                progress_data.update({
+                                    "impact_level": impact_level,
+                                    "status": "完成(属性复制失败)"
+                                })
+                            self.progress_signal.emit(progress_data)
+                        else:
+                            print(f"压缩失败：{file}")
+                            progress_data.update({
+                                "status": "压缩失败",
+                                "impact_level": "未知"
+                            })
+                            self.progress_signal.emit(progress_data)
+
+                    except Exception as e:
+                        print(f"压缩视频失败：{e}")
+                        progress_data.update({"status": "压缩失败"})
+                        self.progress_signal.emit(progress_data)
+
+                except Exception as e:
+                    print(f"压缩视频失败：{e}")
+                    error_info = {
+                        "file_name": os.path.basename(file_path),
+                        "status": f"压缩失败：{str(e)}",
+                        "error": True,
+                        "compression_time": datetime.datetime.now().isoformat()
+                    }
+                    window = self.parent()
+                    if window:
+                        window.save_compression_history(file_path, error_info)
+                    self.progress_signal.emit(error_info)
+                    continue
 
             except Exception as e:
-                print(f"压缩视频失败：{e}")
-                progress_data.update({"status": "压缩失败"})
-                self.progress_signal.emit(progress_data)
+                print(f"处理文件失败：{e}")
+                error_info = {
+                    "file_name": os.path.basename(file_path),
+                    "status": f"处理失败：{str(e)}",
+                    "error": True,
+                    "compression_time": datetime.datetime.now().isoformat()
+                }
+                # 立即保存错误信息
+                window = self.parent()
+                if window:
+                    window.save_compression_history(file_path, error_info)
+                else:
+                    print(f"无法保存错误信息：window is None")
+                
+                self.progress_signal.emit(error_info)
+                continue
 
         self.finished_signal.emit()
 
@@ -460,6 +524,86 @@ class VideoCompressThread(QThread):
             print(f"简单复制元数据失败：{e}")
             return False
 
+    def save_compression_history(self, file_path, compression_info):
+        """保存压缩历史到JSON文件"""
+        history_file = "compression_history.json"
+        print(f"保存压缩历史：{file_path}, {compression_info}")
+        try:
+            # 读取现有历史记录
+            if os.path.exists(history_file):
+                with open(history_file, 'r', encoding='utf-8') as f:
+                    history = json.load(f)
+            else:
+                history = {}
+
+            # 如果是文件不存在的错误，不保存
+            if compression_info.get('status') == "文件不存在":
+                return
+
+            # 如果是"无需压缩"状态，不保存
+            if compression_info.get('status') == "无需压缩":
+                return
+
+            # 如果文件路径已存在且状态为"完成"，只在新状态也是"完成"时才更新
+            if file_path in history:
+                existing_record = history[file_path]
+                if existing_record.get('status') == "完成" and compression_info.get('status') != "完成":
+                    return
+
+            # 更新历史记录，保存所有表格字段
+            history[file_path] = {
+                'file_name': os.path.basename(file_path),
+                'duration': compression_info.get('duration', ''),
+                'original_size': compression_info.get('original_size', 0),
+                'original_bitrate': compression_info.get('original_bitrate', 0),
+                'target_bitrate': compression_info.get('target_bitrate', 0),
+                'compressed_size': compression_info.get('compressed_size', 0),
+                'compression_ratio': compression_info.get('compression_ratio', 0),
+                'impact_level': compression_info.get('impact_level', ''),
+                'status': compression_info.get('status', ''),
+                'compression_time': datetime.datetime.now().isoformat()
+            }
+
+            # 清理空值
+            history[file_path] = {k: v for k, v in history[file_path].items() if v not in [None, '', 0]}
+
+            # 保存更新后的历史记录
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, ensure_ascii=False, indent=2)
+
+        except Exception as e:
+            print(f"保存压缩历史失败：{e}")
+
+    def load_compression_history(self):
+        """从JSON文件加载压缩历史"""
+        history_file = "compression_history.json"
+        try:
+            if os.path.exists(history_file):
+                with open(history_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            return {}
+        except Exception as e:
+            print(f"加载压缩历史失败：{e}")
+            return {}
+
+    def load_settings(self):
+        """加载设置"""
+        try:
+            with open(self.settings_file, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+                self.source_folder = settings.get('last_folder', '')
+                self.coef_spin.setValue(settings.get('quantization_coef', 0.12))
+                self.replace_source_cb.setChecked(settings.get('replace_source', False))
+                self.show_thumbnail_cb.setChecked(settings.get('show_thumbnail', True))
+                if self.source_folder:
+                    self.source_path_label.setText(f"源文件夹：{self.source_folder}")
+                    self.update_file_list()
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.source_folder = ''
+            self.coef_spin.setValue(0.12)
+            self.replace_source_cb.setChecked(False)
+            self.show_thumbnail_cb.setChecked(True)
+
 class ThumbnailLoader(QThread):
     thumbnail_ready = pyqtSignal(object, QPixmap)
     
@@ -494,6 +638,9 @@ class ThumbnailLoader(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # 先定义所有需要的方法
+        self.init_methods()
+        
         self.setWindowTitle("视频批量压缩工具")
         self.setMinimumSize(800, 600)
         
@@ -607,10 +754,77 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.stop_button)
         layout.addLayout(button_layout)
 
-        # 加载设置
+        # 最后再加载设置
         self.load_settings()
 
         self.temp_files = []  # 用于跟踪临时文件
+
+    def init_methods(self):
+        """初始化所有需要的方法"""
+        def save_compression_history(self, file_path, compression_info):
+            """保存压缩历史到JSON文件"""
+            history_file = "compression_history.json"
+            try:
+                # 读取现有历史记录
+                if os.path.exists(history_file):
+                    with open(history_file, 'r', encoding='utf-8') as f:
+                        history = json.load(f)
+                else:
+                    history = {}
+
+                # 如果是文件不存在的错误，不保存
+                if compression_info.get('status') == "文件不存在":
+                    return
+
+                # 如果是"无需压缩"状态，不保存
+                if compression_info.get('status') == "无需压缩":
+                    return
+
+                # 如果文件路径已存在且状态为"完成"，只在新状态也是"完成"时才更新
+                if file_path in history:
+                    existing_record = history[file_path]
+                    if existing_record.get('status') == "完成" and compression_info.get('status') != "完成":
+                        return
+
+                # 更新历史记录，保存所有表格字段
+                history[file_path] = {
+                    'file_name': os.path.basename(file_path),
+                    'duration': compression_info.get('duration', ''),
+                    'original_size': compression_info.get('original_size', 0),
+                    'original_bitrate': compression_info.get('original_bitrate', 0),
+                    'target_bitrate': compression_info.get('target_bitrate', 0),
+                    'compressed_size': compression_info.get('compressed_size', 0),
+                    'compression_ratio': compression_info.get('compression_ratio', 0),
+                    'impact_level': compression_info.get('impact_level', ''),
+                    'status': compression_info.get('status', ''),
+                    'compression_time': datetime.datetime.now().isoformat()
+                }
+
+                # 清理空值
+                history[file_path] = {k: v for k, v in history[file_path].items() if v not in [None, '', 0]}
+
+                # 保存更新后的历史记录
+                with open(history_file, 'w', encoding='utf-8') as f:
+                    json.dump(history, f, ensure_ascii=False, indent=2)
+
+            except Exception as e:
+                print(f"保存压缩历史失败：{e}")
+
+        def load_compression_history(self):
+            """从JSON文件加载压缩历史"""
+            history_file = "compression_history.json"
+            try:
+                if os.path.exists(history_file):
+                    with open(history_file, 'r', encoding='utf-8') as f:
+                        return json.load(f)
+                return {}
+            except Exception as e:
+                print(f"加载压缩历史失败：{e}")
+                return {}
+
+        # 将方法绑定到实例
+        self.save_compression_history = save_compression_history.__get__(self)
+        self.load_compression_history = load_compression_history.__get__(self)
 
     def init_tree_columns(self):
         """初始化树形结构的列"""
@@ -776,6 +990,9 @@ class MainWindow(QMainWindow):
         # 第一列（文件夹/文件名）可以伸展
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
         
+        # 加载压缩历史
+        compression_history = self.load_compression_history()
+        
         def add_items_recursively(parent_path, parent_item=None):
             items = sorted(os.listdir(parent_path))
             for item_name in items:
@@ -793,31 +1010,46 @@ class MainWindow(QMainWindow):
                 
                 # 启用复选框
                 tree_item.setFlags(tree_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                tree_item.setCheckState(0, Qt.CheckState.Unchecked)
                 
                 if os.path.isdir(item_path):
-                    # 文件夹默认取消选择
-                    tree_item.setCheckState(0, Qt.CheckState.Unchecked)
-                    # 获取并缩放文件夹图标
+                    # 文件夹处理代码...
                     folder_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
                     tree_item.setIcon(0, folder_icon)
-                    # 递归处理子文件夹
                     add_items_recursively(item_path, tree_item)
                 else:
                     # 只处理视频文件
                     if os.path.splitext(item_name)[1].lower() in video_extensions:
-                        # 文件默认取消选择
-                        tree_item.setCheckState(0, Qt.CheckState.Unchecked)
-                        # 获取并缩放文件图标
+                        # 设置文件图标
                         file_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
                         tree_item.setIcon(0, file_icon)
                         
-                        # 设置文件大小
-                        size_in_bytes = os.path.getsize(item_path)
-                        formatted_size = format_size(size_in_bytes)
-                        tree_item.setText(3, formatted_size)
-                        
-                        # 设置初始状态
-                        tree_item.setText(9, "等待压缩")
+                        # 从历史记录中恢复信息
+                        if item_path in compression_history:
+                            history = compression_history[item_path]
+                            # 恢复所有表格字段
+                            tree_item.setText(2, str(history.get('duration', '')))  # 时长
+                            tree_item.setText(3, format_size(history.get('original_size', 0)))  # 原始大小
+                            tree_item.setText(4, f"{history.get('original_bitrate', 0):.2f}Mbps")  # 原始比特率
+                            tree_item.setText(5, f"{history.get('target_bitrate', 0):.2f}Mbps")  # 目标比特率
+                            
+                            if history.get('compressed_size'):
+                                tree_item.setText(6, format_size(history.get('compressed_size')))  # 压缩后大小
+                            
+                            if history.get('compression_ratio'):
+                                ratio = history.get('compression_ratio')
+                                tree_item.setText(7, f"{ratio*100:.1f}%")  # 压缩比例
+                            
+                            tree_item.setText(8, history.get('impact_level', ''))  # 影响程度
+                            tree_item.setText(9, history.get('status', '等待压缩'))  # 状态
+                            
+                            # 如果压缩已完成，设置文本颜色为灰色
+                            if history.get('status') == '完成':
+                                for col in range(tree_item.columnCount()):
+                                    tree_item.setForeground(col, QColor(128, 128, 128))
+                        else:
+                            # 新文件，设置初始状态
+                            tree_item.setText(9, "等待压缩")
                         
                         # 只在开关打开时加载缩略图
                         if self.show_thumbnail_cb.isChecked():
@@ -877,6 +1109,8 @@ class MainWindow(QMainWindow):
             self.coef_spin.value(),
             self.tree
         )
+        # 设置父对象，以便在线程中访问主窗口方法
+        self.compress_thread.setParent(self)
         self.compress_thread.progress_signal.connect(self.update_progress)
         self.compress_thread.finished_signal.connect(self.compression_finished)
         self.compress_thread.start()
@@ -916,43 +1150,71 @@ class MainWindow(QMainWindow):
             return
             
         item = items[0]  # 使用找到的第一个匹配项
+        file_path = item.data(0, Qt.ItemDataRole.UserRole)  # 获取完整文件路径
         
-        # 如果是错误状态，只更新状态列
+        # 如果是错误状态，保存错误信息并返回
         if data.get("error"):
             item.setText(9, data["status"])
+            self.save_compression_history(file_path, {
+                "status": data["status"],
+                "error": True,
+                "compression_time": datetime.datetime.now().isoformat()
+            })
             return
+
+        # 更新各列信息并准备历史记录数据
+        history_data = {
+            "file_name": os.path.basename(file_path),
+            "compression_time": datetime.datetime.now().isoformat()
+        }
         
-        # 更新各列信息
+        # 更新并记录各项数据
         if "duration" in data:
-            duration_str = f"{float(data['duration']):.2f} 秒" if data['duration'] != "未知" else "未知"
-            item.setText(2, duration_str)
+            duration_str = f"{float(data['duration']):.2f}" if data['duration'] != "未知" else "未知"
+            item.setText(2, f"{duration_str} 秒" if duration_str != "未知" else "未知")
+            history_data["duration"] = duration_str
+        
         if "original_size" in data:
             item.setText(3, format_size(data["original_size"]))
+            history_data["original_size"] = data["original_size"]
+        
         if "original_bitrate" in data:
             item.setText(4, f"{data['original_bitrate']:.2f} Mbps")
+            history_data["original_bitrate"] = data["original_bitrate"]
+        
         if "target_bitrate" in data:
             item.setText(5, f"{data['target_bitrate']:.2f} Mbps")
+            history_data["target_bitrate"] = data["target_bitrate"]
         
-        # 如果是跳过压缩的情况，清空压缩后的信息列
+        # 处理压缩后的信息
         if data.get("skip_compression"):
             item.setText(6, "-")
             item.setText(7, "-")
+            history_data["skip_compression"] = True
         else:
             if "compressed_size" in data:
                 compressed_size = data["compressed_size"]
                 item.setText(6, format_size(compressed_size))
+                history_data["compressed_size"] = compressed_size
+                
                 if "original_size" in data:
-                    # 计算并显示体积比例
                     ratio = compressed_size / data["original_size"]
                     ratio_text = f"{ratio:.1%}"
                     item.setText(7, ratio_text)
+                    history_data["compression_ratio"] = ratio
         
-        # 更新影响程度列
+        # 更新影响程度
         if "impact_level" in data:
             item.setText(8, data["impact_level"])
+            history_data["impact_level"] = data["impact_level"]
         
-        # 更新状态列
+        # 更新状态
         item.setText(9, data["status"])
+        history_data["status"] = data["status"]
+        
+        # 当压缩完成时保存历史记录
+        if data["status"] in ["完成", "完成(属性复制失败)"]:
+            self.save_compression_history(file_path, history_data)
 
     def compression_finished(self):
         """压缩完成后的处理"""
@@ -1015,7 +1277,7 @@ class MainWindow(QMainWindow):
             settings['quantization_coef'] = new_value
             
             with open(self.settings_file, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, ensure_ascii=False)
+                json.dump(settings, f, ensure_ascii=False, indent=4)
         except Exception as e:
             print(f"保存设置失败：{e}")
 
