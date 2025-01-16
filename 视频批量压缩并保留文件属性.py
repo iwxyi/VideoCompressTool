@@ -921,11 +921,43 @@ class MainWindow(QMainWindow):
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     settings = json.load(f)
             
+            # 保存树形控件的状态
+            tree_state = {
+                'expanded': [],  # 展开的节点路径列表
+                'checked': [],   # 选中的节点路径列表
+                'partially_checked': []  # 部分选中的节点路径列表
+            }
+            
+            def save_item_state(item):
+                item_path = item.data(0, Qt.ItemDataRole.UserRole)
+                if not item_path:
+                    return
+                    
+                # 保存展开状态
+                if item.isExpanded():
+                    tree_state['expanded'].append(item_path)
+                
+                # 保存选中状态
+                check_state = item.checkState(0)
+                if check_state == Qt.CheckState.Checked:
+                    tree_state['checked'].append(item_path)
+                elif check_state == Qt.CheckState.PartiallyChecked:
+                    tree_state['partially_checked'].append(item_path)
+                
+                # 递归处理子项目
+                for i in range(item.childCount()):
+                    save_item_state(item.child(i))
+            
+            # 遍历所有顶层项目
+            for i in range(self.tree.topLevelItemCount()):
+                save_item_state(self.tree.topLevelItem(i))
+            
             settings.update({
                 'last_folder': self.source_folder,
                 'quantization_coef': self.coef_spin.value(),
                 'replace_source': self.replace_source_cb.isChecked(),
                 'show_thumbnail': self.show_thumbnail_cb.isChecked(),
+                'tree_state': tree_state,
                 'window': {
                     'size': {
                         'width': self.width(),
@@ -942,6 +974,99 @@ class MainWindow(QMainWindow):
                 json.dump(settings, f, ensure_ascii=False, indent=4)
         except Exception as e:
             print(f"保存设置失败：{e}")
+
+    def save_tree_state(self):
+        """单独保存树形控件的状态到tree_state.json"""
+        try:
+            tree_state = {
+                'expanded': [],  # 展开的节点路径列表
+                'checked': [],   # 选中的节点路径列表
+                'partially_checked': []  # 部分选中的节点路径列表
+            }
+            
+            # 遍历所有项目（包括子项目）
+            iterator = QTreeWidgetItemIterator(self.tree)
+            while iterator.value():
+                item = iterator.value()
+                item_path = item.data(0, Qt.ItemDataRole.UserRole)
+                if item_path:
+                    # 保存展开状态
+                    if item.isExpanded():
+                        tree_state['expanded'].append(item_path)
+                    
+                    # 保存选中状态
+                    check_state = item.checkState(0)
+                    if check_state == Qt.CheckState.Checked:
+                        tree_state['checked'].append(item_path)
+                    elif check_state == Qt.CheckState.PartiallyChecked:
+                        tree_state['partially_checked'].append(item_path)
+                
+                iterator += 1
+            
+            # 保存到单独的文件
+            with open('tree_state.json', 'w', encoding='utf-8') as f:
+                json.dump(tree_state, f, ensure_ascii=False, indent=4)
+                print(f"保存树形控件状态：展开 {len(tree_state['expanded'])} 项，"
+                      f"选中 {len(tree_state['checked'])} 项，"
+                      f"部分选中 {len(tree_state['partially_checked'])} 项")
+            
+        except Exception as e:
+            print(f"保存树形控件状态失败：{e}")
+
+    def restore_tree_state(self):
+        """从tree_state.json恢复树形控件的状态"""
+        try:
+            if os.path.exists('tree_state.json'):
+                with open('tree_state.json', 'r', encoding='utf-8') as f:
+                    tree_state = json.load(f)
+                    expanded_paths = set(tree_state.get('expanded', []))
+                    checked_paths = set(tree_state.get('checked', []))
+                    partially_checked_paths = set(tree_state.get('partially_checked', []))
+                    
+                    print(f"正在恢复树形控件状态：展开 {len(expanded_paths)} 项，"
+                          f"选中 {len(checked_paths)} 项，"
+                          f"部分选中 {len(partially_checked_paths)} 项")
+                    
+                    # 暂时阻止项目变化信号
+                    self.tree.blockSignals(True)
+                    
+                    # 遍历所有项目（包括子项目）
+                    iterator = QTreeWidgetItemIterator(self.tree)
+                    while iterator.value():
+                        item = iterator.value()
+                        item_path = item.data(0, Qt.ItemDataRole.UserRole)
+                        
+                        if item_path:
+                            # 恢复展开状态
+                            if item_path in expanded_paths:
+                                item.setExpanded(True)
+                            
+                            # 恢复选中状态
+                            if item_path in checked_paths:
+                                item.setCheckState(0, Qt.CheckState.Checked)
+                            elif item_path in partially_checked_paths:
+                                item.setCheckState(0, Qt.CheckState.PartiallyChecked)
+                            else:
+                                item.setCheckState(0, Qt.CheckState.Unchecked)
+                        
+                        iterator += 1
+                    
+                    # 恢复信号
+                    self.tree.blockSignals(False)
+                    
+                    # 更新展开/折叠按钮的文本
+                    any_expanded = False
+                    iterator = QTreeWidgetItemIterator(self.tree)
+                    while iterator.value():
+                        if iterator.value().isExpanded():
+                            any_expanded = True
+                            break
+                        iterator += 1
+                    
+                    self.expand_button.setText("折叠全部" if any_expanded else "展开全部")
+                    
+        except Exception as e:
+            print(f"恢复树形控件状态失败：{e}")
 
     def select_source_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择源文件夹", self.source_folder)  # 使用上次的路径作为默认值
@@ -1048,8 +1173,8 @@ class MainWindow(QMainWindow):
                                 for col in range(tree_item.columnCount()):
                                     tree_item.setForeground(col, QColor(128, 128, 128))
                         else:
-                            # 新文件，设置初始状态
-                            tree_item.setText(9, "等待压缩")
+                            # 新文件，设置初始状态为空
+                            tree_item.setText(9, "")  # 修改这里，初始状态为空
                         
                         # 只在开关打开时加载缩略图
                         if self.show_thumbnail_cb.isChecked():
@@ -1083,6 +1208,9 @@ class MainWindow(QMainWindow):
         else:
             self.expand_button.setText("展开全部")
 
+        # 在文件列表更新完成后恢复状态
+        self.restore_tree_state()
+
     def set_thumbnail(self, item, pixmap):
         """设置缩略图"""
         # 只在显示缩略图开启时设置缩略图
@@ -1096,11 +1224,29 @@ class MainWindow(QMainWindow):
         if not self.source_folder:
             return
         
+        # 更新选中文件的状态为"等待压缩"
+        def update_selected_items(item):
+            if item.checkState(0) != Qt.CheckState.Unchecked:  # 处理选中和部分选中的项目
+                # 如果是文件
+                if item.childCount() == 0:
+                    file_path = item.data(0, Qt.ItemDataRole.UserRole)
+                    if file_path and os.path.splitext(file_path)[1].lower() in ['.mp4', '.avi', '.mov', '.mkv']:
+                        item.setText(9, "等待压缩")
+                # 如果是文件夹，递归处理选中的子项目
+                for i in range(item.childCount()):
+                    update_selected_items(item.child(i))
+        
+        # 从树形控件的根节点开始更新状态
+        iterator = QTreeWidgetItemIterator(self.tree)
+        while iterator.value():
+            item = iterator.value()
+            if item.parent() is None:  # 只处理顶层项目
+                update_selected_items(item)
+            iterator += 1
+        
         self.source_path_button.setEnabled(False)
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
-        # 不再禁用量化系数调整
-        # self.coef_spin.setEnabled(False)
         
         self.compress_thread = VideoCompressThread(
             self.source_folder, 
@@ -1109,7 +1255,6 @@ class MainWindow(QMainWindow):
             self.coef_spin.value(),
             self.tree
         )
-        # 设置父对象，以便在线程中访问主窗口方法
         self.compress_thread.setParent(self)
         self.compress_thread.progress_signal.connect(self.update_progress)
         self.compress_thread.finished_signal.connect(self.compression_finished)
@@ -1235,7 +1380,10 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"停止压缩线程失败：{e}")
         
-        # 保存设置
+        # 保存树形控件状态到单独的文件
+        self.save_tree_state()
+        
+        # 保存其他设置
         self.save_settings()
         event.accept()
 
