@@ -759,6 +759,11 @@ class MainWindow(QMainWindow):
 
         self.temp_files = []  # 用于跟踪临时文件
 
+        # 设置树形控件接收键盘事件
+        self.tree.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # 连接键盘事件处理函数
+        self.tree.keyPressEvent = self.tree_key_press_event
+
     def init_methods(self):
         """初始化所有需要的方法"""
         def save_compression_history(self, file_path, compression_info):
@@ -1113,7 +1118,9 @@ class MainWindow(QMainWindow):
             self.tree.header().setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
         
         # 第一列（文件夹/文件名）可以伸展
-        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self.tree.header().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Interactive
+        )
         
         # 加载压缩历史
         compression_history = self.load_compression_history()
@@ -1479,14 +1486,16 @@ class MainWindow(QMainWindow):
     def open_file(self, file_path):
         """使用系统默认程序打开文件"""
         try:
-            if platform.system() == 'Windows':
-                os.startfile(file_path)
-            elif platform.system() == 'Darwin':  # macOS
+            if platform.system() == 'Darwin':  # macOS
+                # 使用系统默认播放器打开
                 subprocess.run(['open', file_path])
+            elif platform.system() == 'Windows':
+                os.startfile(file_path)
             else:  # Linux
                 subprocess.run(['xdg-open', file_path])
+            print(f"正在预览视频：{file_path}")
         except Exception as e:
-            print(f"打开文件失败：{e}")
+            print(f"预览视频失败：{e}")
 
     def toggle_expand_collapse(self):
         """切换展开/折叠状态"""
@@ -1631,6 +1640,36 @@ class MainWindow(QMainWindow):
         
         # 恢复信号
         self.tree.blockSignals(False)
+
+    def tree_key_press_event(self, event):
+        """处理树形控件的键盘事件"""
+        if event.key() == Qt.Key.Key_Space:
+            # 获取当前选中的项目
+            current_item = self.tree.currentItem()
+            if current_item:
+                file_path = current_item.data(0, Qt.ItemDataRole.UserRole)
+                if file_path and os.path.isfile(file_path):
+                    # 检查是否为视频文件
+                    ext = os.path.splitext(file_path)[1].lower()
+                    if ext in ['.mp4', '.avi', '.mov', '.mkv']:
+                        self.preview_video(file_path)
+        else:
+            # 保持原有的键盘事件处理
+            QTreeWidget.keyPressEvent(self.tree, event)
+
+    def preview_video(self, file_path):
+        """预览视频文件"""
+        try:
+            if platform.system() == 'Darwin':  # macOS
+                # 使用系统默认播放器打开
+                subprocess.run(['open', file_path])
+            elif platform.system() == 'Windows':
+                os.startfile(file_path)
+            else:  # Linux
+                subprocess.run(['xdg-open', file_path])
+            print(f"正在预览视频：{file_path}")
+        except Exception as e:
+            print(f"预览视频失败：{e}")
 
 def format_size(size_in_bytes):
     """格式化文件大小显示"""
