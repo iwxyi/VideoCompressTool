@@ -136,15 +136,44 @@ class VideoCompressThread(QThread):
 
             # 直接压缩为目标文件
             try:
-                command = ['ffmpeg', '-i', input_video_path, '-b:v', str(appropriate_bitrate), output_video_path]
+                # 添加 -progress pipe:1 参数来输出进度信息
+                command = [
+                    'ffmpeg', '-i', input_video_path,
+                    '-b:v', str(appropriate_bitrate),
+                    '-progress', 'pipe:1',  # 输出进度到管道
+                    '-nostats',  # 禁用默认统计信息
+                    output_video_path
+                ]
                 creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
                 self.current_process = subprocess.Popen(
                     command,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
+                    universal_newlines=True,  # 使用文本模式
                     creationflags=creation_flags
                 )
-                self.current_process.wait()
+
+                # 读取进度信息
+                while self.current_process.poll() is None and self.is_running:
+                    line = self.current_process.stdout.readline()
+                    if line:
+                        if 'out_time_ms=' in line:
+                            try:
+                                # 处理 'N/A' 的情况
+                                time_str = line.split('=')[1].strip()
+                                if time_str != 'N/A':
+                                    time_ms = int(time_str) / 1000000  # 转换为秒
+                                    if duration:
+                                        progress = (time_ms / float(duration)) * 100
+                                        # 更新进度信息
+                                        progress_data.update({
+                                            "status": f"正在压缩 {progress:.1f}%"
+                                        })
+                                        self.progress_signal.emit(progress_data)
+                            except (ValueError, IndexError) as e:
+                                print(f"解析进度信息失败：{e}")
+                                continue
+
                 if not self.is_running:
                     if os.path.exists(output_video_path):
                         os.remove(output_video_path)
@@ -416,12 +445,17 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """程序关闭时保存设置"""
-        if hasattr(self, 'compress_thread') and self.compress_thread.isRunning():
-            self.compress_thread.stop()
-            self.compress_thread.wait()
+        # 检查压缩线程是否存在并且正在运行
+        if hasattr(self, 'compress_thread') and self.compress_thread is not None:
+            try:
+                if self.compress_thread.isRunning():
+                    self.compress_thread.stop()
+                    self.compress_thread.wait()
+            except Exception as e:
+                print(f"停止压缩线程失败：{e}")
         
+        # 保存设置
         self.save_settings()
-        self.cleanup_temp_files()
         event.accept()
 
     def cleanup_temp_files(self):
