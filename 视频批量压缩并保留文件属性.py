@@ -133,7 +133,8 @@ class VideoCompressThread(QThread):
                 continue
 
             # 检查是否需要压缩
-            if current_bitrate and appropriate_bitrate >= current_bitrate * 0.95:
+            # 0.95 是比较合适的，但是 0.94 这种压缩后可能比例也就小 1%，不如多算一点
+            if current_bitrate and appropriate_bitrate >= current_bitrate * 0.9:
                 print(f"无需压缩：{file}，新比特率（{appropriate_bitrate/1024/1024:.2f}Mbps）接近或高于原比特率（{current_bitrate/1024/1024:.2f}Mbps）")
                 self.progress_signal.emit({
                     "file_name": file,
