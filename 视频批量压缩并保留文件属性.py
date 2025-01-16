@@ -210,6 +210,29 @@ class VideoCompressThread(QThread):
                     
                     # 复制文件属性
                     if self.copy_video_metadata(input_video_path, output_video_path):
+                        # 如果启用了替换源文件选项
+                        if self.delete_source:  # 保持变量名不变，但功能改为替换
+                            try:
+                                # 备份原文件（添加.bak后缀）
+                                backup_path = input_video_path + '.bak'
+                                os.rename(input_video_path, backup_path)
+                                
+                                # 将压缩后的文件移动到源文件位置
+                                os.rename(output_video_path, input_video_path)
+                                
+                                # 删除备份文件
+                                os.remove(backup_path)
+                                
+                                print(f"已替换源文件：{input_video_path}")
+                            except Exception as e:
+                                print(f"替换源文件失败：{e}")
+                                # 如果替换失败，尝试恢复原文件
+                                try:
+                                    if os.path.exists(backup_path):
+                                        os.rename(backup_path, input_video_path)
+                                except Exception as e2:
+                                    print(f"恢复原文件失败：{e2}")
+                        
                         # 更新最终结果
                         progress_data.update({
                             "impact_level": impact_level,
@@ -221,14 +244,6 @@ class VideoCompressThread(QThread):
                             "status": "完成(属性复制失败)"
                         })
                     self.progress_signal.emit(progress_data)
-                    
-                    # 完成所有分析后，如果启用了删除源文件选项，再删除源文件
-                    if self.delete_source:
-                        try:
-                            os.remove(input_video_path)
-                            print(f"已删除源文件：{input_video_path}")
-                        except Exception as e:
-                            print(f"删除源文件失败：{e}")
                 else:
                     print(f"压缩失败：{file}")
                     progress_data.update({
@@ -369,6 +384,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("视频批量压缩工具")
         self.setMinimumSize(800, 600)
         
+        # 加载窗口设置
+        self.settings_file = "settings.json"
+        self.load_window_settings()
+        
         # 主布局
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
@@ -413,9 +432,10 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         layout.addWidget(self.table)
 
-        # 删除源文件选项（移到表格后面）
-        self.delete_source_cb = QCheckBox("压缩后删除源文件")
-        layout.addWidget(self.delete_source_cb)
+        # 替换源文件选项
+        self.replace_source_cb = QCheckBox("压缩后替换源文件")
+        self.replace_source_cb.stateChanged.connect(self.on_replace_source_changed)
+        layout.addWidget(self.replace_source_cb)
 
         # 控制按钮
         button_layout = QHBoxLayout()
@@ -429,7 +449,6 @@ class MainWindow(QMainWindow):
         layout.addLayout(button_layout)
 
         # 加载设置
-        self.settings_file = "settings.json"
         self.load_settings()
 
         self.temp_files = []  # 用于跟踪临时文件
@@ -441,22 +460,98 @@ class MainWindow(QMainWindow):
                 settings = json.load(f)
                 self.source_folder = settings.get('last_folder', '')
                 self.coef_spin.setValue(settings.get('quantization_coef', 0.12))
+                self.replace_source_cb.setChecked(settings.get('replace_source', False))
                 if self.source_folder:
                     self.source_path_label.setText(f"源文件夹：{self.source_folder}")
                     self.update_file_list()
         except (FileNotFoundError, json.JSONDecodeError):
             self.source_folder = ''
-            self.coef_spin.setValue(0.12)  # 默认值
+            self.coef_spin.setValue(0.12)
+            self.replace_source_cb.setChecked(False)
+
+    def load_window_settings(self):
+        """加载窗口设置"""
+        try:
+            with open(self.settings_file, 'r', encoding='utf-8') as f:
+                settings = json.load(f)
+                window_settings = settings.get('window', {})
+                
+                # 获取所有屏幕
+                screens = QApplication.screens()
+                if not screens:
+                    return
+                
+                # 获取主屏幕尺寸
+                primary_screen = QApplication.primaryScreen()
+                screen_geometry = primary_screen.availableGeometry()
+                
+                # 恢复窗口尺寸
+                if 'size' in window_settings:
+                    width = min(window_settings['size']['width'], screen_geometry.width())
+                    height = min(window_settings['size']['height'], screen_geometry.height())
+                    self.resize(width, height)
+                
+                # 恢复窗口位置
+                if 'pos' in window_settings:
+                    x = window_settings['pos']['x']
+                    y = window_settings['pos']['y']
+                    
+                    # 检查位置是否在任何屏幕内
+                    pos_visible = False
+                    for screen in screens:
+                        screen_geo = screen.availableGeometry()
+                        if screen_geo.contains(x, y):
+                            pos_visible = True
+                            break
+                    
+                    # 如果位置有效则使用，否则居中显示
+                    if pos_visible:
+                        self.move(x, y)
+                    else:
+                        self.center_window()
+                else:
+                    self.center_window()
+                
+        except (FileNotFoundError, json.JSONDecodeError):
+            self.center_window()
+
+    def center_window(self):
+        """将窗口居中显示"""
+        screen = QApplication.primaryScreen().availableGeometry()
+        size = self.geometry()
+        x = (screen.width() - size.width()) // 2
+        y = (screen.height() - size.height()) // 2
+        self.move(x, y)
 
     def save_settings(self):
-        """保存设置"""
-        settings = {
-            'last_folder': self.source_folder,
-            'quantization_coef': self.coef_spin.value()
-        }
+        """保存所有设置"""
         try:
+            # 读取现有设置
+            settings = {}
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+            
+            # 更新设置
+            settings.update({
+                'last_folder': self.source_folder,
+                'quantization_coef': self.coef_spin.value(),
+                'replace_source': self.replace_source_cb.isChecked(),
+                'window': {
+                    'size': {
+                        'width': self.width(),
+                        'height': self.height()
+                    },
+                    'pos': {
+                        'x': self.x(),
+                        'y': self.y()
+                    }
+                }
+            })
+            
+            # 保存设置
             with open(self.settings_file, 'w', encoding='utf-8') as f:
-                json.dump(settings, f, ensure_ascii=False)
+                json.dump(settings, f, ensure_ascii=False, indent=4)
         except Exception as e:
             print(f"保存设置失败：{e}")
 
@@ -512,7 +607,7 @@ class MainWindow(QMainWindow):
         self.compress_thread = VideoCompressThread(
             self.source_folder, 
             self.source_folder, 
-            self.delete_source_cb.isChecked(),
+            self.replace_source_cb.isChecked(),
             self.coef_spin.value()
         )
         self.compress_thread.progress_signal.connect(self.update_progress)
@@ -644,6 +739,31 @@ class MainWindow(QMainWindow):
                 json.dump(settings, f, ensure_ascii=False)
         except Exception as e:
             print(f"保存设置失败：{e}")
+
+    def on_replace_source_changed(self, state):
+        """处理替换源文件选项变化"""
+        try:
+            settings = {}
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+            
+            settings['replace_source'] = bool(state)
+            
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False)
+        except Exception as e:
+            print(f"保存替换源文件设置失败：{e}")
+
+    def moveEvent(self, event):
+        """窗口移动时保存位置"""
+        super().moveEvent(event)
+        self.save_settings()
+
+    def resizeEvent(self, event):
+        """窗口大小改变时保存尺寸"""
+        super().resizeEvent(event)
+        self.save_settings()
 
 if __name__ == "__main__":
     app = QApplication([])
