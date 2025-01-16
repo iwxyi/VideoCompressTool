@@ -6,7 +6,7 @@ import json
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, 
                             QHBoxLayout, QWidget, QFileDialog, QTreeWidget, 
                             QTreeWidgetItem, QLabel, QCheckBox, QHeaderView,
-                            QDoubleSpinBox, QTreeWidgetItemIterator)
+                            QDoubleSpinBox, QTreeWidgetItemIterator, QStyle)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QByteArray, QSize
 from PyQt6.QtGui import QPixmap
 import platform
@@ -51,12 +51,13 @@ class VideoCompressThread(QThread):
     progress_signal = pyqtSignal(dict)
     finished_signal = pyqtSignal()
 
-    def __init__(self, folder_path, target_folder, delete_source, quantization_coef):
+    def __init__(self, folder_path, target_folder, delete_source, quantization_coef, tree_widget):
         super().__init__()
         self.folder_path = folder_path
         self.target_folder = target_folder
         self.delete_source = delete_source
         self.quantization_coef = quantization_coef
+        self.tree = tree_widget
         self.is_running = True
         self.current_process = None
 
@@ -65,37 +66,6 @@ class VideoCompressThread(QThread):
         self.quantization_coef = new_coef
         print(f"量化系数已更新为：{new_coef}")
 
-    def get_video_creation_time(self, file_path):
-        """获取视频的拍摄时间"""
-        try:
-            command = [
-                'ffprobe',
-                '-v', 'quiet',
-                '-select_streams', 'v:0',
-                '-show_entries', 'format_tags=creation_time',
-                '-of', 'json',
-                file_path
-            ]
-            result = subprocess.run(command, capture_output=True, text=True)
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                creation_time = data.get('format', {}).get('tags', {}).get('creation_time')
-                if creation_time:
-                    # 将ISO格式时间转换为时间戳
-                    try:
-                        return datetime.datetime.strptime(creation_time, "%Y-%m-%dT%H:%M:%S.%fZ").timestamp()
-                    except ValueError:
-                        try:
-                            return datetime.datetime.strptime(creation_time, "%Y-%m-%dT%H:%M:%SZ").timestamp()
-                        except ValueError:
-                            pass
-            
-            # 如果无法获取拍摄时间，则尝试获取文件的修改时间
-            return os.path.getmtime(file_path)
-        except Exception as e:
-            print(f"获取视频创建时间失败：{e}")
-            return os.path.getmtime(file_path)  # 返回文件修改时间作为后备选项
-
     def run(self):
         if not os.path.exists(self.target_folder):
             os.makedirs(self.target_folder)
@@ -103,21 +73,29 @@ class VideoCompressThread(QThread):
         video_extensions = ['.mp4', '.avi', '.mov', '.mkv']
         files_to_process = []
         
-        # 收集所有视频文件及其拍摄时间和相对路径
-        for root, dirs, files in os.walk(self.folder_path):
-            for file in files:
-                file_extension = os.path.splitext(file)[1].lower()
-                if file_extension in video_extensions:
-                    file_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(root, self.folder_path)
-                    creation_time = self.get_video_creation_time(file_path)
-                    files_to_process.append((file_path, creation_time, rel_path))
+        # 收集选中的文件
+        def collect_checked_files(item):
+            if item.checkState(0) != Qt.CheckState.Unchecked:  # 处理选中和部分选中的项目
+                # 如果是文件
+                if item.childCount() == 0:
+                    file_path = item.data(0, Qt.ItemDataRole.UserRole)
+                    if file_path and os.path.splitext(file_path)[1].lower() in video_extensions:
+                        rel_path = os.path.relpath(os.path.dirname(file_path), self.folder_path)
+                        files_to_process.append((file_path, rel_path))
+                # 如果是文件夹，递归处理选中的子项目
+                for i in range(item.childCount()):
+                    collect_checked_files(item.child(i))
 
-        # 按拍摄时间排序，最新的文件在前
-        files_to_process.sort(key=lambda x: x[1], reverse=True)
+        # 从树形控件的根节点开始收集选中的文件
+        iterator = QTreeWidgetItemIterator(self.tree)
+        while iterator.value():
+            item = iterator.value()
+            if item.parent() is None:  # 只处理顶层项目
+                collect_checked_files(item)
+            iterator += 1
 
-        # 处理排序后的文件
-        for file_path, mod_time, rel_path in files_to_process:
+        # 处理收集到的文件
+        for file_path, rel_path in files_to_process:
             if not self.is_running:
                 if self.current_process:
                     self.current_process.terminate()
@@ -558,9 +536,14 @@ class MainWindow(QMainWindow):
 
         # 将表格改为树形结构
         self.tree = QTreeWidget()
-        
-        # 初始化表头（先不设置列，等加载设置后再设置）
-        self.init_tree_columns()
+        self.tree.setHeaderLabels(['文件'])
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.ExtendedSelection)
+        # 启用复选框
+        self.tree.setColumnCount(1)
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        # 添加这一行来启用复选框
+        self.tree.setItemsExpandable(True)
+        self.tree.setAlternatingRowColors(True)
         
         # 设置缩略图列的宽度和行高
         self.tree.setColumnWidth(1, 120)  # 设置缩略图列宽（改为第二列）
@@ -769,7 +752,7 @@ class MainWindow(QMainWindow):
         # 设置列标题
         headers = [
             "文件夹/文件名",
-            "缩略图",  # 始终保留缩略图列
+            "缩略图",
             "时长", "文件大小", "当前比特率",
             "目标比特率", "压缩后大小", "体积比例", "影响程度", "状态"
         ]
@@ -777,70 +760,88 @@ class MainWindow(QMainWindow):
         self.tree.setColumnCount(len(headers))
         self.tree.setHeaderLabels(headers)
         
-        # 根据开关状态设置缩略图列宽度
-        self.tree.setColumnWidth(1, 120 if self.show_thumbnail_cb.isChecked() else 0)
+        # 设置图标大小
+        icon_size = QSize(16, 16)  # 设置为16x16像素
+        self.tree.setIconSize(icon_size)
         
-        # 创建根节点字典，用于跟踪文件夹节点
-        folder_nodes = {}
+        # 设置文件名列的默认宽度和其他列的自适应
+        self.tree.setColumnWidth(0, 400)  # 设置文件名列宽为400像素
+        self.tree.setColumnWidth(1, 120 if self.show_thumbnail_cb.isChecked() else 0)  # 缩略图列
         
-        # 先收集所有文件信息
-        files_info = []
-        for root, dirs, files in os.walk(self.source_folder):
-            rel_path = os.path.relpath(root, self.source_folder)
-            for filename in sorted(files):
-                if os.path.splitext(filename)[1].lower() in video_extensions:
-                    file_path = os.path.join(root, filename)
-                    files_info.append((rel_path, filename, file_path))
-
-        # 按文件夹路径排序
-        files_info.sort(key=lambda x: (x[0], x[1]))
-
-        # 创建文件夹结构和添加文件
-        for rel_path, filename, file_path in files_info:
-            # 创建当前文件夹的节点
-            if rel_path == '.':
-                current_node = self.tree
-            else:
-                # 确保父文件夹路径存在
-                path_parts = rel_path.split(os.sep)
-                current_path = ''
-                parent_node = self.tree
+        # 其他列自适应内容
+        for i in range(2, self.tree.columnCount()):
+            self.tree.header().setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        
+        # 第一列（文件夹/文件名）可以伸展
+        self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        
+        def add_items_recursively(parent_path, parent_item=None):
+            items = sorted(os.listdir(parent_path))
+            for item_name in items:
+                item_path = os.path.join(parent_path, item_name)
                 
-                for part in path_parts:
-                    current_path = os.path.join(current_path, part) if current_path else part
-                    if current_path not in folder_nodes:
-                        folder_node = QTreeWidgetItem(parent_node)
-                        folder_node.setText(0, part)
-                        folder_node.setExpanded(True)
-                        folder_nodes[current_path] = folder_node
-                    parent_node = folder_nodes[current_path]
-                current_node = parent_node
-
-            # 创建文件项
-            item = QTreeWidgetItem(current_node)
-            item.setText(0, filename)
-            
-            # 设置文件大小
-            size_in_bytes = os.path.getsize(file_path)
-            formatted_size = format_size(size_in_bytes)
-            item.setText(3, formatted_size)
-            
-            # 设置初始状态
-            item.setText(9, "等待压缩")
-            
-            # 存储完整文件路径
-            item.setData(0, Qt.ItemDataRole.UserRole, file_path)
-            
-            # 只在开关打开时加载缩略图
-            if self.show_thumbnail_cb.isChecked():
-                thread = ThumbnailLoader(file_path, item)
-                thread.thumbnail_ready.connect(self.set_thumbnail)
-                self.thumbnail_threads.append(thread)
-                thread.start()
-
+                # 创建新项目
+                if parent_item is None:
+                    tree_item = QTreeWidgetItem(self.tree)
+                else:
+                    tree_item = QTreeWidgetItem(parent_item)
+                
+                # 设置项目文本和数据
+                tree_item.setText(0, item_name)
+                tree_item.setData(0, Qt.ItemDataRole.UserRole, item_path)
+                
+                # 启用复选框
+                tree_item.setFlags(tree_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                
+                if os.path.isdir(item_path):
+                    # 文件夹默认取消选择
+                    tree_item.setCheckState(0, Qt.CheckState.Unchecked)
+                    # 获取并缩放文件夹图标
+                    folder_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+                    tree_item.setIcon(0, folder_icon)
+                    # 递归处理子文件夹
+                    add_items_recursively(item_path, tree_item)
+                else:
+                    # 只处理视频文件
+                    if os.path.splitext(item_name)[1].lower() in video_extensions:
+                        # 文件默认取消选择
+                        tree_item.setCheckState(0, Qt.CheckState.Unchecked)
+                        # 获取并缩放文件图标
+                        file_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon)
+                        tree_item.setIcon(0, file_icon)
+                        
+                        # 设置文件大小
+                        size_in_bytes = os.path.getsize(item_path)
+                        formatted_size = format_size(size_in_bytes)
+                        tree_item.setText(3, formatted_size)
+                        
+                        # 设置初始状态
+                        tree_item.setText(9, "等待压缩")
+                        
+                        # 只在开关打开时加载缩略图
+                        if self.show_thumbnail_cb.isChecked():
+                            thread = ThumbnailLoader(item_path, tree_item)
+                            thread.thumbnail_ready.connect(self.set_thumbnail)
+                            self.thumbnail_threads.append(thread)
+                            thread.start()
+                    else:
+                        # 移除非视频文件的项目
+                        if parent_item:
+                            parent_item.removeChild(tree_item)
+                        else:
+                            index = self.tree.indexOfTopLevelItem(tree_item)
+                            self.tree.takeTopLevelItem(index)
+        
+        # 从源文件夹开始递归添加项目
+        if self.source_folder:
+            add_items_recursively(self.source_folder)
+        
+        # 连接项目变化信号
+        self.tree.itemChanged.connect(self.on_item_changed)
+        
         # 重新启用树形控件的更新
         self.tree.setUpdatesEnabled(True)
-
+        
         # 更新完文件列表后，更新展开/折叠按钮的文本
         for i in range(self.tree.topLevelItemCount()):
             if self.tree.topLevelItem(i).isExpanded():
@@ -872,7 +873,8 @@ class MainWindow(QMainWindow):
             self.source_folder, 
             self.source_folder, 
             self.replace_source_cb.isChecked(),
-            self.coef_spin.value()
+            self.coef_spin.value(),
+            self.tree
         )
         self.compress_thread.progress_signal.connect(self.update_progress)
         self.compress_thread.finished_signal.connect(self.compression_finished)
@@ -1127,6 +1129,92 @@ class MainWindow(QMainWindow):
         
         # 保存设置
         self.save_settings()
+
+    def add_folder_to_tree(self, path, parent=None):
+        """添加文件夹到树形控件，包含复选框"""
+        if parent is None:
+            item = QTreeWidgetItem(self.tree)
+        else:
+            item = QTreeWidgetItem(parent)
+            
+        item.setText(0, os.path.basename(path))
+        item.setData(0, Qt.ItemDataRole.UserRole, path)
+        # 设置复选框
+        item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+        item.setCheckState(0, Qt.CheckState.Checked)  # 默认选中
+        
+        if os.path.isdir(path):
+            # 设置文件夹图标
+            item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_DirIcon))
+            for child in sorted(os.listdir(path)):
+                child_path = os.path.join(path, child)
+                if os.path.isfile(child_path):
+                    if any(child.lower().endswith(ext) for ext in ['.mp4', '.avi', '.mov', '.mkv']):
+                        child_item = QTreeWidgetItem(item)
+                        child_item.setText(0, child)
+                        child_item.setData(0, Qt.ItemDataRole.UserRole, child_path)
+                        # 设置文件图标
+                        child_item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
+                        # 设置复选框
+                        child_item.setFlags(child_item.flags() | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled)
+                        child_item.setCheckState(0, Qt.CheckState.Checked)  # 默认选中
+                elif os.path.isdir(child_path):
+                    self.add_folder_to_tree(child_path, item)
+
+        return item
+
+    def on_item_changed(self, item, column):
+        """处理项目选中状态变化"""
+        # 阻止信号以避免递归
+        self.tree.blockSignals(True)
+        
+        # 如果改变的是选中状态
+        if column == 0:
+            # 获取当前选中状态
+            check_state = item.checkState(0)
+            
+            # 更新所有子项目
+            for i in range(item.childCount()):
+                child = item.child(i)
+                child.setCheckState(0, check_state)
+            
+            # 递归更新所有父项目的状态
+            def update_parent_state(item):
+                parent = item.parent()
+                if parent:
+                    # 检查所有兄弟项目的状态
+                    all_checked = True
+                    all_unchecked = True
+                    partial_checked = False
+                    
+                    for i in range(parent.childCount()):
+                        child_state = parent.child(i).checkState(0)
+                        if child_state == Qt.CheckState.Checked:
+                            all_unchecked = False
+                        elif child_state == Qt.CheckState.Unchecked:
+                            all_checked = False
+                        elif child_state == Qt.CheckState.PartiallyChecked:
+                            all_checked = False
+                            all_unchecked = False
+                            partial_checked = True
+                            break
+                    
+                    # 设置父项目的状态
+                    if all_checked:
+                        parent.setCheckState(0, Qt.CheckState.Checked)
+                    elif all_unchecked:
+                        parent.setCheckState(0, Qt.CheckState.Unchecked)
+                    else:
+                        parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
+                    
+                    # 递归更新上层父项目
+                    update_parent_state(parent)
+            
+            # 开始递归更新父项目状态
+            update_parent_state(item)
+        
+        # 恢复信号
+        self.tree.blockSignals(False)
 
 def format_size(size_in_bytes):
     """格式化文件大小显示"""
