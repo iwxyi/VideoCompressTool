@@ -165,6 +165,7 @@ class VideoCompressThread(QThread):
                     # 发送开始压缩信号，更新视频信息
                     progress_data = {
                         "file_name": file,
+                        "file_path": file_path,  # 添加完整文件路径
                         "duration": f"{duration:.2f}" if duration else "未知",
                         "original_size": input_video_size,
                         "original_bitrate": current_bitrate / 1024 / 1024 if current_bitrate else 0,
@@ -1275,39 +1276,27 @@ class MainWindow(QMainWindow):
             self.stop_button.setEnabled(False)
             
             # 更新正在压缩的文件状态为"停止压缩"
-            for row in range(self.tree.topLevelItemCount()):
-                for col in range(self.tree.columnCount()):
-                    if self.tree.itemWidget(self.tree.topLevelItem(row), col) is not None:
-                        self.tree.itemWidget(self.tree.topLevelItem(row), col).setStyleSheet("background-color: red")
+            iterator = QTreeWidgetItemIterator(self.tree)
+            while iterator.value():
+                item = iterator.value()
+                cell_text = item.text(9)
+                if cell_text == "正在压缩" or cell_text.startswith("正在压缩"):  # 匹配"正在压缩"和"正在压缩 XX%"
+                    item.setText(9, "停止压缩")
+                    current_file = item.data(0, Qt.ItemDataRole.UserRole)  # 这里获取的是完整路径
+                    # 如果有临时文件，删除它
+                    if current_file:
+                        name, ext = os.path.splitext(current_file)
+                        temp_file = f"{name}_comp{ext}"
+                        try:
+                            if os.path.exists(temp_file):
+                                os.remove(temp_file)
+                                print(f"已删除未完成的临时文件：{temp_file}")
+                        except Exception as e:
+                            print(f"删除临时文件失败：{e}")
+                iterator += 1
             
             # 停止压缩线程
             self.compress_thread.stop()
-            
-            # 只删除当前正在压缩的临时文件
-            if hasattr(self.compress_thread, 'current_process'):
-                try:
-                    # 获取当前正在处理的文件路径
-                    current_file = None
-                    iterator = QTreeWidgetItemIterator(self.tree)
-                    while iterator.value():
-                        item = iterator.value()
-                        cell_text = item.text(9)
-                        if cell_text == "正在压缩" or cell_text.startswith("正在压缩") or cell_text == "停止压缩":  # 查找状态为"正在压缩"的文件
-                            current_file = item.data(0, Qt.ItemDataRole.UserRole)
-                            break
-                        iterator += 1
-                    
-                    if current_file:
-                        # 构造临时文件路径
-                        name, ext = os.path.splitext(current_file)
-                        temp_file = f"{name}_comp{ext}"
-                        if os.path.exists(temp_file):
-                            os.remove(temp_file)
-                            print(f"已删除未完成的临时文件：{temp_file}")
-                except Exception as e:
-                    print(f"删除临时文件失败：{e}")
-            
-            # 不等待线程结束
             self.compress_thread = None
 
     def update_progress(self, data):
@@ -1317,7 +1306,8 @@ class MainWindow(QMainWindow):
         iterator = QTreeWidgetItemIterator(self.tree)
         while iterator.value():
             item = iterator.value()
-            if item.text(0) == os.path.basename(data["file_name"]):
+            # 使用完整路径而不是仅文件名来匹配
+            if item.data(0, Qt.ItemDataRole.UserRole) == data.get("file_path", ""):
                 items.append(item)
             iterator += 1
 
