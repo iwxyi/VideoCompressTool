@@ -1283,8 +1283,29 @@ class MainWindow(QMainWindow):
             # 停止压缩线程
             self.compress_thread.stop()
             
-            # 清理临时文件
-            self.cleanup_temp_files()
+            # 只删除当前正在压缩的临时文件
+            if hasattr(self.compress_thread, 'current_process'):
+                try:
+                    # 获取当前正在处理的文件路径
+                    current_file = None
+                    iterator = QTreeWidgetItemIterator(self.tree)
+                    while iterator.value():
+                        item = iterator.value()
+                        cell_text = item.text(9)
+                        if cell_text == "正在压缩" or cell_text.startswith("正在压缩") or cell_text == "停止压缩":  # 查找状态为"正在压缩"的文件
+                            current_file = item.data(0, Qt.ItemDataRole.UserRole)
+                            break
+                        iterator += 1
+                    
+                    if current_file:
+                        # 构造临时文件路径
+                        name, ext = os.path.splitext(current_file)
+                        temp_file = f"{name}_comp{ext}"
+                        if os.path.exists(temp_file):
+                            os.remove(temp_file)
+                            print(f"已删除未完成的临时文件：{temp_file}")
+                except Exception as e:
+                    print(f"删除临时文件失败：{e}")
             
             # 不等待线程结束
             self.compress_thread = None
