@@ -1756,10 +1756,17 @@ class MainWindow(QMainWindow):
             # 获取当前选中状态
             check_state = item.checkState(0)
             
+            # 递归更新所有子项目的状态
+            def update_children_state(parent_item, state):
+                for i in range(parent_item.childCount()):
+                    child = parent_item.child(i)
+                    child.setCheckState(0, state)
+                    # 递归处理子文件夹
+                    if child.childCount() > 0:
+                        update_children_state(child, state)
+            
             # 更新所有子项目
-            for i in range(item.childCount()):
-                child = item.child(i)
-                child.setCheckState(0, check_state)
+            update_children_state(item, check_state)
             
             # 递归更新所有父项目的状态
             def update_parent_state(item):
@@ -1770,17 +1777,29 @@ class MainWindow(QMainWindow):
                     all_unchecked = True
                     partial_checked = False
                     
-                    for i in range(parent.childCount()):
-                        child_state = parent.child(i).checkState(0)
-                        if child_state == Qt.CheckState.Checked:
-                            all_unchecked = False
-                        elif child_state == Qt.CheckState.Unchecked:
-                            all_checked = False
-                        elif child_state == Qt.CheckState.PartiallyChecked:
-                            all_checked = False
-                            all_unchecked = False
-                            partial_checked = True
-                            break
+                    # 递归检查所有子项目
+                    def check_children_state(parent_item):
+                        nonlocal all_checked, all_unchecked, partial_checked
+                        for i in range(parent_item.childCount()):
+                            child = parent_item.child(i)
+                            child_state = child.checkState(0)
+                            
+                            if child_state == Qt.CheckState.Checked:
+                                all_unchecked = False
+                            elif child_state == Qt.CheckState.Unchecked:
+                                all_checked = False
+                            elif child_state == Qt.CheckState.PartiallyChecked:
+                                all_checked = False
+                                all_unchecked = False
+                                partial_checked = True
+                                break
+                            
+                            # 如果是文件夹，递归检查其子项目
+                            if child.childCount() > 0:
+                                check_children_state(child)
+                    
+                    # 检查所有子项目的状态
+                    check_children_state(parent)
                     
                     # 设置父项目的状态
                     if all_checked:
