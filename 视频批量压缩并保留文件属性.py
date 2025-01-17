@@ -43,8 +43,6 @@ def estimate_appropriate_bitrate(input_video_path, quantization_coef):
         duration = float(stream.get('duration', 0))
         current_bitrate = int(stream.get('bit_rate', 0))
         
-        print(f"分辨率：{width}x{height}, 帧率：{frame_rate}, 时长：{duration}秒")
-
         # 计算建议比特率
         bitrate = (width * height * frame_rate * quantization_coef)
         return bitrate, duration, current_bitrate, frame_rate
@@ -484,22 +482,21 @@ class VideoCompressThread(QThread):
             return f"显著 ({ssim_percent})"
 
     def copy_video_metadata(self, input_path, output_path):
-        """复制视频的元数据信息"""
+        """复制视频的所有元数据信息，包括拍摄设备、相机镜头等所有元数据"""
         try:
-            # 使用ffmpeg复制所有元数据和流信息，但排除可能导致问题的数据流
+            # 使用ffmpeg复制所有元数据和流信息，简化命令并添加必要的参数
             command = [
-                'ffmpeg', '-i', input_path,  # 输入为原始文件
+                'ffmpeg', 
+                '-i', input_path,  # 输入原始文件
                 '-i', output_path,  # 压缩后的文件
-                '-map', '1:v',  # 使用第二个输入的视频流（压缩后的）
-                '-map', '1:a?',  # 复制所有音频流（如果存在）
-                '-map', '0:s?',  # 从原始文件复制字幕流（如果存在）
-                '-map_metadata', '0',  # 使用第一个输入的元数据
-                '-metadata', f'creation_time={time.strftime("%Y-%m-%dT%H:%M:%S.000000Z")}',  # 保持创建时间
-                '-movflags', '+faststart+use_metadata_tags',  # 优化元数据处理
+                '-map', '1:v',  # 使用压缩后的视频流
+                '-map', '1:a?',  # 使用压缩后的音频流（如果存在）
+                '-map_metadata:g', '0',  # 只复制全局元数据
                 '-c', 'copy',  # 仅复制，不重新编码
-                '-y',  # 覆盖输出文件
-                '-ignore_unknown',  # 忽略未知流
-                f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"  # 临时文件
+                '-movflags', '+faststart',  # 优化文件结构
+                '-ignore_editlist', '1',  # 忽略编辑列表
+                '-y',  # 自动覆盖
+                f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"
             ]
             
             # 执行命令
@@ -543,12 +540,14 @@ class VideoCompressThread(QThread):
         """使用更简单的方式复制元数据（作为备选方案）"""
         try:
             command = [
-                'ffmpeg', '-i', input_path,
+                'ffmpeg',
+                '-i', input_path,
                 '-i', output_path,
-                '-map', '1:v',
-                '-map', '1:a?',
-                '-map_metadata', '0',
+                '-map', '1',  # 使用第二个输入的所有流
+                '-map_metadata:g', '0',  # 只复制全局元数据
                 '-c', 'copy',
+                '-movflags', '+faststart',
+                '-ignore_editlist', '1',
                 '-y',
                 f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"
             ]
@@ -574,43 +573,59 @@ class VideoCompressThread(QThread):
             if compression_info.get('status') in ["文件不存在", "无需压缩"]:
                 return
 
-            cursor = self.conn.cursor()
-            
-            # 检查是否已存在记录
-            cursor.execute('SELECT status FROM compression_history WHERE file_path = ?', (file_path,))
-            existing_record = cursor.fetchone()
-            
-            # 如果记录存在且状态为"完成"，只在新状态也是"完成"时才更新
-            if existing_record and existing_record[0] == "完成" and compression_info.get('status') != "完成":
-                return
+            # 在当前线程创建新的数据库连接
+            with sqlite3.connect('compression_history.db') as conn:
+                cursor = conn.cursor()
+                
+                # 确保表存在
+                cursor.execute('''CREATE TABLE IF NOT EXISTS compression_history
+                    (file_path TEXT PRIMARY KEY,
+                    file_name TEXT,
+                    duration TEXT,
+                    original_size INTEGER,
+                    original_bitrate REAL,
+                    target_bitrate REAL,
+                    compressed_size INTEGER,
+                    compression_ratio REAL,
+                    impact_level TEXT,
+                    status TEXT,
+                    compression_time TEXT)''')
+                
+                # 检查是否已存在记录
+                cursor.execute('SELECT status FROM compression_history WHERE file_path = ?', (file_path,))
+                existing_record = cursor.fetchone()
+                
+                # 如果记录存在且状态为"完成"，只在新状态也是"完成"时才更新
+                if existing_record and existing_record[0] == "完成" and compression_info.get('status') != "完成":
+                    return
 
-            # 准备数据
-            data = {
-                'file_path': file_path,
-                'file_name': os.path.basename(file_path),
-                'duration': compression_info.get('duration', ''),
-                'original_size': compression_info.get('original_size', 0),
-                'original_bitrate': compression_info.get('original_bitrate', 0),
-                'target_bitrate': compression_info.get('target_bitrate', 0),
-                'compressed_size': compression_info.get('compressed_size', 0),
-                'compression_ratio': compression_info.get('compression_ratio', 0),
-                'impact_level': compression_info.get('impact_level', ''),
-                'status': compression_info.get('status', ''),
-                'compression_time': datetime.datetime.now().isoformat()
-            }
+                # 准备数据
+                data = {
+                    'file_path': file_path,
+                    'file_name': os.path.basename(file_path),
+                    'duration': compression_info.get('duration', ''),
+                    'original_size': compression_info.get('original_size', 0),
+                    'original_bitrate': compression_info.get('original_bitrate', 0),
+                    'target_bitrate': compression_info.get('target_bitrate', 0),
+                    'compressed_size': compression_info.get('compressed_size', 0),
+                    'compression_ratio': compression_info.get('compression_ratio', 0),
+                    'impact_level': compression_info.get('impact_level', ''),
+                    'status': compression_info.get('status', ''),
+                    'compression_time': datetime.datetime.now().isoformat()
+                }
 
-            # 清理空值和0值
-            data = {k: v for k, v in data.items() if v not in [None, '', 0]}
+                # 清理空值和0值
+                data = {k: v for k, v in data.items() if v not in [None, '', 0]}
 
-            # 构建SQL语句
-            fields = ', '.join(data.keys())
-            placeholders = ', '.join(['?' for _ in data])
-            values = tuple(data.values())
+                # 构建SQL语句
+                fields = ', '.join(data.keys())
+                placeholders = ', '.join(['?' for _ in data])
+                values = tuple(data.values())
 
-            # 使用REPLACE语法进行插入或更新
-            sql = f'REPLACE INTO compression_history ({fields}) VALUES ({placeholders})'
-            cursor.execute(sql, values)
-            self.conn.commit()
+                # 使用REPLACE语法进行插入或更新
+                sql = f'REPLACE INTO compression_history ({fields}) VALUES ({placeholders})'
+                cursor.execute(sql, values)
+                conn.commit()
 
         except Exception as e:
             print(f"保存压缩历史失败：{e}")
@@ -618,20 +633,37 @@ class VideoCompressThread(QThread):
     def load_compression_history(self):
         """从SQLite数据库加载压缩历史"""
         try:
-            cursor = self.conn.cursor()
-            cursor.execute('SELECT * FROM compression_history')
-            rows = cursor.fetchall()
-            
-            # 转换为字典格式
-            history = {}
-            columns = [description[0] for description in cursor.description]
-            
-            for row in rows:
-                record = dict(zip(columns, row))
-                file_path = record.pop('file_path')  # 移除并获取文件路径
-                history[file_path] = record
-            
-            return history
+            # 在当前线程创建新的数据库连接
+            with sqlite3.connect('compression_history.db') as conn:
+                cursor = conn.cursor()
+                
+                # 确保表存在
+                cursor.execute('''CREATE TABLE IF NOT EXISTS compression_history
+                    (file_path TEXT PRIMARY KEY,
+                    file_name TEXT,
+                    duration TEXT,
+                    original_size INTEGER,
+                    original_bitrate REAL,
+                    target_bitrate REAL,
+                    compressed_size INTEGER,
+                    compression_ratio REAL,
+                    impact_level TEXT,
+                    status TEXT,
+                    compression_time TEXT)''')
+                
+                cursor.execute('SELECT * FROM compression_history')
+                rows = cursor.fetchall()
+                
+                # 转换为字典格式
+                history = {}
+                columns = [description[0] for description in cursor.description]
+                
+                for row in rows:
+                    record = dict(zip(columns, row))
+                    file_path = record.pop('file_path')  # 移除并获取文件路径
+                    history[file_path] = record
+                
+                return history
         except Exception as e:
             print(f"加载压缩历史失败：{e}")
             return {}
@@ -932,43 +964,59 @@ class MainWindow(QMainWindow):
                 if compression_info.get('status') in ["文件不存在", "无需压缩"]:
                     return
 
-                cursor = self.conn.cursor()
-                
-                # 检查是否已存在记录
-                cursor.execute('SELECT status FROM compression_history WHERE file_path = ?', (file_path,))
-                existing_record = cursor.fetchone()
-                
-                # 如果记录存在且状态为"完成"，只在新状态也是"完成"时才更新
-                if existing_record and existing_record[0] == "完成" and compression_info.get('status') != "完成":
-                    return
+                # 在当前线程创建新的数据库连接
+                with sqlite3.connect('compression_history.db') as conn:
+                    cursor = conn.cursor()
+                    
+                    # 确保表存在
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS compression_history
+                        (file_path TEXT PRIMARY KEY,
+                        file_name TEXT,
+                        duration TEXT,
+                        original_size INTEGER,
+                        original_bitrate REAL,
+                        target_bitrate REAL,
+                        compressed_size INTEGER,
+                        compression_ratio REAL,
+                        impact_level TEXT,
+                        status TEXT,
+                        compression_time TEXT)''')
+                    
+                    # 检查是否已存在记录
+                    cursor.execute('SELECT status FROM compression_history WHERE file_path = ?', (file_path,))
+                    existing_record = cursor.fetchone()
+                    
+                    # 如果记录存在且状态为"完成"，只在新状态也是"完成"时才更新
+                    if existing_record and existing_record[0] == "完成" and compression_info.get('status') != "完成":
+                        return
 
-                # 准备数据
-                data = {
-                    'file_path': file_path,
-                    'file_name': os.path.basename(file_path),
-                    'duration': compression_info.get('duration', ''),
-                    'original_size': compression_info.get('original_size', 0),
-                    'original_bitrate': compression_info.get('original_bitrate', 0),
-                    'target_bitrate': compression_info.get('target_bitrate', 0),
-                    'compressed_size': compression_info.get('compressed_size', 0),
-                    'compression_ratio': compression_info.get('compression_ratio', 0),
-                    'impact_level': compression_info.get('impact_level', ''),
-                    'status': compression_info.get('status', ''),
-                    'compression_time': datetime.datetime.now().isoformat()
-                }
+                    # 准备数据
+                    data = {
+                        'file_path': file_path,
+                        'file_name': os.path.basename(file_path),
+                        'duration': compression_info.get('duration', ''),
+                        'original_size': compression_info.get('original_size', 0),
+                        'original_bitrate': compression_info.get('original_bitrate', 0),
+                        'target_bitrate': compression_info.get('target_bitrate', 0),
+                        'compressed_size': compression_info.get('compressed_size', 0),
+                        'compression_ratio': compression_info.get('compression_ratio', 0),
+                        'impact_level': compression_info.get('impact_level', ''),
+                        'status': compression_info.get('status', ''),
+                        'compression_time': datetime.datetime.now().isoformat()
+                    }
 
-                # 清理空值和0值
-                data = {k: v for k, v in data.items() if v not in [None, '', 0]}
+                    # 清理空值和0值
+                    data = {k: v for k, v in data.items() if v not in [None, '', 0]}
 
-                # 构建SQL语句
-                fields = ', '.join(data.keys())
-                placeholders = ', '.join(['?' for _ in data])
-                values = tuple(data.values())
+                    # 构建SQL语句
+                    fields = ', '.join(data.keys())
+                    placeholders = ', '.join(['?' for _ in data])
+                    values = tuple(data.values())
 
-                # 使用REPLACE语法进行插入或更新
-                sql = f'REPLACE INTO compression_history ({fields}) VALUES ({placeholders})'
-                cursor.execute(sql, values)
-                self.conn.commit()
+                    # 使用REPLACE语法进行插入或更新
+                    sql = f'REPLACE INTO compression_history ({fields}) VALUES ({placeholders})'
+                    cursor.execute(sql, values)
+                    conn.commit()
 
             except Exception as e:
                 print(f"保存压缩历史失败：{e}")
@@ -976,20 +1024,37 @@ class MainWindow(QMainWindow):
         def load_compression_history(self):
             """从SQLite数据库加载压缩历史"""
             try:
-                cursor = self.conn.cursor()
-                cursor.execute('SELECT * FROM compression_history')
-                rows = cursor.fetchall()
-                
-                # 转换为字典格式
-                history = {}
-                columns = [description[0] for description in cursor.description]
-                
-                for row in rows:
-                    record = dict(zip(columns, row))
-                    file_path = record.pop('file_path')  # 移除并获取文件路径
-                    history[file_path] = record
-                
-                return history
+                # 在当前线程创建新的数据库连接
+                with sqlite3.connect('compression_history.db') as conn:
+                    cursor = conn.cursor()
+                    
+                    # 确保表存在
+                    cursor.execute('''CREATE TABLE IF NOT EXISTS compression_history
+                        (file_path TEXT PRIMARY KEY,
+                        file_name TEXT,
+                        duration TEXT,
+                        original_size INTEGER,
+                        original_bitrate REAL,
+                        target_bitrate REAL,
+                        compressed_size INTEGER,
+                        compression_ratio REAL,
+                        impact_level TEXT,
+                        status TEXT,
+                        compression_time TEXT)''')
+                    
+                    cursor.execute('SELECT * FROM compression_history')
+                    rows = cursor.fetchall()
+                    
+                    # 转换为字典格式
+                    history = {}
+                    columns = [description[0] for description in cursor.description]
+                    
+                    for row in rows:
+                        record = dict(zip(columns, row))
+                        file_path = record.pop('file_path')  # 移除并获取文件路径
+                        history[file_path] = record
+                    
+                    return history
             except Exception as e:
                 print(f"加载压缩历史失败：{e}")
                 return {}
