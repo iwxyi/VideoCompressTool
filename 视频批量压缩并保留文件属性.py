@@ -1311,18 +1311,32 @@ class MainWindow(QMainWindow):
                         # 从历史记录中恢复信息
                         if item_path in compression_history:
                             history = compression_history[item_path]
-                            # 恢复所有表格字段
+                            # 恢复所有表格字段，确保所有数值都有默认值且不为 None
                             tree_item.setText(2, str(history.get('duration', '')))  # 时长
                             tree_item.setText(3, format_size(history.get('original_size', 0)))  # 原始大小
-                            tree_item.setText(4, f"{history.get('original_bitrate', 0):.2f}Mbps")  # 原始比特率
-                            tree_item.setText(5, f"{history.get('target_bitrate', 0):.2f}Mbps")  # 目标比特率
                             
-                            if history.get('compressed_size'):
-                                tree_item.setText(6, format_size(history.get('compressed_size')))  # 压缩后大小
+                            # 安全地处理比特率
+                            original_bitrate = history.get('original_bitrate')
+                            if original_bitrate is not None:
+                                tree_item.setText(4, f"{float(original_bitrate):.2f}Mbps")  # 原始比特率
+                            else:
+                                tree_item.setText(4, "0.00Mbps")
                             
-                            if history.get('compression_ratio'):
-                                ratio = history.get('compression_ratio')
-                                tree_item.setText(7, f"{ratio*100:.1f}%")  # 压缩比例
+                            target_bitrate = history.get('target_bitrate')
+                            if target_bitrate is not None:
+                                tree_item.setText(5, f"{float(target_bitrate):.2f}Mbps")  # 目标比特率
+                            else:
+                                tree_item.setText(5, "0.00Mbps")
+                            
+                            # 安全地处理压缩后大小
+                            compressed_size = history.get('compressed_size')
+                            if compressed_size:
+                                tree_item.setText(6, format_size(compressed_size))
+                            
+                            # 安全地处理压缩比例
+                            compression_ratio = history.get('compression_ratio')
+                            if compression_ratio is not None:
+                                tree_item.setText(7, f"{float(compression_ratio)*100:.1f}%")
                             
                             tree_item.setText(8, history.get('impact_level', ''))  # 影响程度
                             tree_item.setText(9, history.get('status', '等待压缩'))  # 状态
@@ -1973,11 +1987,20 @@ class MainWindow(QMainWindow):
             
             # 格式化总大小
             def format_size(size_in_bytes):
+                # 处理 None、0 或无效值的情况
+                try:
+                    size = float(size_in_bytes or 0)  # 如果是 None 则使用 0
+                except (TypeError, ValueError):
+                    return "0 B"
+                
+                if size == 0:
+                    return "0 B"
+                    
                 for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-                    if size_in_bytes < 1024.0:
-                        return f"{size_in_bytes:.2f} {unit}"
-                    size_in_bytes /= 1024.0
-                return f"{size_in_bytes:.2f} PB"
+                    if size < 1024.0:
+                        return f"{size:.2f} {unit}"
+                    size /= 1024.0
+                return f"{size:.2f} PB"
             
             folder_name = current_item.text(0)
             total_size_str = format_size(total_size)
@@ -2033,11 +2056,20 @@ class MainWindow(QMainWindow):
 
 def format_size(size_in_bytes):
     """格式化文件大小显示"""
+    # 处理 None、0 或无效值的情况
+    try:
+        size = float(size_in_bytes or 0)  # 如果是 None 则使用 0
+    except (TypeError, ValueError):
+        return "0 B"
+    
+    if size == 0:
+        return "0 B"
+        
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
-        if size_in_bytes < 1024.0:
-            return f"{size_in_bytes:.2f} {unit}"
-        size_in_bytes /= 1024.0
-    return f"{size_in_bytes:.2f} PB"
+        if size < 1024.0:
+            return f"{size:.2f} {unit}"
+        size /= 1024.0
+    return f"{size:.2f} PB"
 
 if __name__ == "__main__":
     app = QApplication([])
