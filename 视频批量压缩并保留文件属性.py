@@ -1944,16 +1944,53 @@ class MainWindow(QMainWindow):
             return
             
         current_item = selected_items[0]
-        if current_item.childCount() > 0:  # 如果是文件夹
-            self.video_info_label.setText("")
+        
+        # 如果是文件夹，显示文件夹信息
+        if current_item.childCount() > 0:
+            video_count = 0
+            total_size = 0
+            
+            def count_videos(item):
+                nonlocal video_count, total_size
+                # 如果是文件
+                if item.childCount() == 0:
+                    file_path = item.data(0, Qt.ItemDataRole.UserRole)
+                    if file_path and os.path.exists(file_path):
+                        ext = os.path.splitext(file_path)[1].lower()
+                        if ext in ['.mp4', '.avi', '.mov', '.mkv']:
+                            video_count += 1
+                            try:
+                                total_size += os.path.getsize(file_path)
+                            except:
+                                pass
+                # 如果是文件夹，递归处理
+                else:
+                    for i in range(item.childCount()):
+                        count_videos(item.child(i))
+            
+            # 统计所选文件夹中的视频
+            count_videos(current_item)
+            
+            # 格式化总大小
+            def format_size(size_in_bytes):
+                for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                    if size_in_bytes < 1024.0:
+                        return f"{size_in_bytes:.2f} {unit}"
+                    size_in_bytes /= 1024.0
+                return f"{size_in_bytes:.2f} PB"
+            
+            folder_name = current_item.text(0)
+            total_size_str = format_size(total_size)
+            self.video_info_label.setText(f"文件夹: {folder_name} | 包含视频: {video_count} 个 | 总大小: {total_size_str}")
             return
             
+        # 如果是视频文件，显示视频信息
         file_path = current_item.data(0, Qt.ItemDataRole.UserRole)
         if not file_path or not os.path.exists(file_path):
             self.video_info_label.setText("")
             return
         
-        # 创建并启动新的工作线程
+        # 创建并启动新的工作线程获取视频信息
         self.current_info_worker = VideoInfoWorker(file_path)
         self.current_info_worker.info_ready.connect(self.video_info_label.setText)
         self.current_info_worker.start()
