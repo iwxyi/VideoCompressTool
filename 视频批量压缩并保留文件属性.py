@@ -157,32 +157,58 @@ class VideoCompressThread(QThread):
                     # 0.95 是比较合适的，但是 0.94 这种压缩后可能比例也就小 1%，不如多算一点
                     if current_bitrate and appropriate_bitrate >= current_bitrate * 0.9:
                         print(f"无需压缩：{file}，新比特率（{appropriate_bitrate/1024/1024:.2f}Mbps）接近或高于原比特率（{current_bitrate/1024/1024:.2f}Mbps）")
-                        progress_data = {
-                            "file_name": file,
-                            "file_path": file_path,  # 添加完整文件路径
-                            "duration": f"{duration:.2f}" if duration else "未知",
-                            "original_size": input_video_size,
-                            "original_bitrate": current_bitrate / 1024 / 1024 if current_bitrate else 0,
-                            "target_bitrate": appropriate_bitrate / 1024 / 1024,
-                            "status": "无需压缩",
-                            "skip_compression": True,
-                            "compression_time": datetime.datetime.now().isoformat()
-                        }
                         
-                        # 保存压缩历史
-                        window = self.parent()
-                        if window:
-                            window.save_compression_history(file_path, progress_data)
+                        # 查找对应的树形项目
+                        item = None
+                        iterator = QTreeWidgetItemIterator(self.tree)
+                        while iterator.value():
+                            if iterator.value().data(0, Qt.ItemDataRole.UserRole) == file_path:
+                                item = iterator.value()
+                                break
+                            iterator += 1
                         
-                        # 发送进度信号
-                        self.progress_signal.emit(progress_data)
+                        # 检查是否已有比特率数据
+                        has_existing_data = False
+                        if item and item.text(4).strip():  # 检查原始比特率列是否有内容
+                            has_existing_data = True
+                        
+                        if not has_existing_data:
+                            progress_data = {
+                                "file_name": file,
+                                "file_path": file_path,
+                                "duration": f"{duration:.2f} 秒" if duration and duration != "未知" else "未知",  # 添加"秒"单位
+                                "original_size": input_video_size,
+                                "original_bitrate": current_bitrate / 1024 / 1024 if current_bitrate else 0,
+                                "target_bitrate": appropriate_bitrate / 1024 / 1024,
+                                "status": "无需压缩",
+                                "skip_compression": True,
+                                "compression_time": datetime.datetime.now().isoformat()
+                            }
+                            
+                            # 保存压缩历史
+                            window = self.parent()
+                            if window:
+                                window.save_compression_history(file_path, progress_data)
+                            
+                            # 发送进度信号
+                            self.progress_signal.emit(progress_data)
+                        else:
+                            # 如果已有数据，只更新状态
+                            progress_data = {
+                                "file_name": file,
+                                "file_path": file_path,
+                                "status": "无需压缩",
+                                "skip_compression": True
+                            }
+                            self.progress_signal.emit(progress_data)
+                        
                         continue
 
                     # 发送开始压缩信号，更新视频信息
                     progress_data = {
                         "file_name": file,
                         "file_path": file_path,  # 添加完整文件路径
-                        "duration": f"{duration:.2f}" if duration else "未知",
+                        "duration": f"{duration:.2f} 秒" if duration and duration != "未知" else "未知",  # 添加"秒"单位
                         "original_size": input_video_size,
                         "original_bitrate": current_bitrate / 1024 / 1024 if current_bitrate else 0,
                         "target_bitrate": appropriate_bitrate / 1024 / 1024,
@@ -1322,8 +1348,13 @@ class MainWindow(QMainWindow):
                         if item_path in compression_history:
                             history = compression_history[item_path]
                             # 恢复所有表格字段，确保所有数值都有默认值且不为 None
-                            tree_item.setText(2, str(history.get('duration', '')))  # 时长
-                            tree_item.setText(3, format_size(history.get('original_size', 0)))  # 原始大小
+                            duration = history.get('duration', '')
+                            tree_item.setText(2, f"{duration} 秒" if duration else "")  # 时长
+                            
+                            # 显示原始文件大小
+                            original_size = history.get('original_size')
+                            if original_size:
+                                tree_item.setText(3, format_size(original_size))  # 原始大小
                             
                             # 安全地处理比特率
                             original_bitrate = history.get('original_bitrate')
@@ -1510,7 +1541,13 @@ class MainWindow(QMainWindow):
         
         # 更新并记录各项数据
         if "duration" in data:
-            duration_str = f"{float(data['duration']):.2f}" if data['duration'] != "未知" else "未知"
+            # 处理带有"秒"字的时长字符串
+            duration = data['duration']
+            if isinstance(duration, str):
+                # 如果是字符串，先去掉"秒"字再转换
+                duration = duration.replace(" 秒", "")
+            
+            duration_str = f"{float(duration):.2f}" if duration != "未知" else "未知"
             item.setText(2, f"{duration_str} 秒" if duration_str != "未知" else "未知")
             history_data["duration"] = duration_str
         
