@@ -1193,8 +1193,8 @@ class MainWindow(QMainWindow):
                     
                     self.expand_button.setText("折叠全部" if any_expanded else "展开全部")
                     
-                    # 更新选中数量显示
-                    self.update_selection_count()
+                    # 使用QTimer延迟更新选中数量，确保在UI更新后执行
+                    QTimer.singleShot(200, self.update_selection_count)
                     
         except Exception as e:
             print(f"恢复树形控件状态失败：{e}")
@@ -1927,9 +1927,6 @@ class MainWindow(QMainWindow):
 
     def update_selection_count(self, item=None, column=None):
         """更新选中视频数量显示"""
-        if column is not None and column != 0:  # 如果不是复选框列，忽略
-            return
-            
         checked_count = 0
         iterator = QTreeWidgetItemIterator(self.tree)
         while iterator.value():
@@ -1939,6 +1936,7 @@ class MainWindow(QMainWindow):
             iterator += 1
         
         self.selection_info_label.setText(f"已选择: {checked_count} 个视频")
+        print(f"更新选中数量：{checked_count}")  # 添加调试输出
 
 def format_size(size_in_bytes):
     """格式化文件大小显示"""
