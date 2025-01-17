@@ -1565,8 +1565,11 @@ class MainWindow(QMainWindow):
         
         # 处理压缩后的信息
         if data.get("skip_compression"):
-            item.setText(6, "-")
-            item.setText(7, "-")
+            # 如果为空，则标记为"-"；否则保留原有数据
+            if item.text(6) == "":
+                item.setText(6, "-")
+            if item.text(7) == "":
+                item.setText(7, "-")
             history_data["skip_compression"] = True
         else:
             if "compressed_size" in data:
