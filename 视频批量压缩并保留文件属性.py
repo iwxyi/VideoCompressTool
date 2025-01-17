@@ -16,6 +16,7 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QColor, QPixmap
 import platform
 import datetime
+import sqlite3  # 添加 sqlite3 导入
 
 
 """
@@ -531,33 +532,25 @@ class VideoCompressThread(QThread):
             return False
 
     def save_compression_history(self, file_path, compression_info):
-        """保存压缩历史到JSON文件"""
-        history_file = "compression_history.json"
-        print(f"保存压缩历史：{file_path}, {compression_info}")
+        """保存压缩历史到SQLite数据库"""
         try:
-            # 读取现有历史记录
-            if os.path.exists(history_file):
-                with open(history_file, 'r', encoding='utf-8') as f:
-                    history = json.load(f)
-            else:
-                history = {}
-
-            # 如果是文件不存在的错误，不保存
-            if compression_info.get('status') == "文件不存在":
+            # 如果是文件不存在或无需压缩的状态，不保存
+            if compression_info.get('status') in ["文件不存在", "无需压缩"]:
                 return
 
-            # 如果是"无需压缩"状态，不保存
-            if compression_info.get('status') == "无需压缩":
+            cursor = self.conn.cursor()
+            
+            # 检查是否已存在记录
+            cursor.execute('SELECT status FROM compression_history WHERE file_path = ?', (file_path,))
+            existing_record = cursor.fetchone()
+            
+            # 如果记录存在且状态为"完成"，只在新状态也是"完成"时才更新
+            if existing_record and existing_record[0] == "完成" and compression_info.get('status') != "完成":
                 return
 
-            # 如果文件路径已存在且状态为"完成"，只在新状态也是"完成"时才更新
-            if file_path in history:
-                existing_record = history[file_path]
-                if existing_record.get('status') == "完成" and compression_info.get('status') != "完成":
-                    return
-
-            # 更新历史记录，保存所有表格字段
-            history[file_path] = {
+            # 准备数据
+            data = {
+                'file_path': file_path,
                 'file_name': os.path.basename(file_path),
                 'duration': compression_info.get('duration', ''),
                 'original_size': compression_info.get('original_size', 0),
@@ -570,24 +563,39 @@ class VideoCompressThread(QThread):
                 'compression_time': datetime.datetime.now().isoformat()
             }
 
-            # 清理空值
-            history[file_path] = {k: v for k, v in history[file_path].items() if v not in [None, '', 0]}
+            # 清理空值和0值
+            data = {k: v for k, v in data.items() if v not in [None, '', 0]}
 
-            # 保存更新后的历史记录
-            with open(history_file, 'w', encoding='utf-8') as f:
-                json.dump(history, f, ensure_ascii=False, indent=2)
+            # 构建SQL语句
+            fields = ', '.join(data.keys())
+            placeholders = ', '.join(['?' for _ in data])
+            values = tuple(data.values())
+
+            # 使用REPLACE语法进行插入或更新
+            sql = f'REPLACE INTO compression_history ({fields}) VALUES ({placeholders})'
+            cursor.execute(sql, values)
+            self.conn.commit()
 
         except Exception as e:
             print(f"保存压缩历史失败：{e}")
 
     def load_compression_history(self):
-        """从JSON文件加载压缩历史"""
-        history_file = "compression_history.json"
+        """从SQLite数据库加载压缩历史"""
         try:
-            if os.path.exists(history_file):
-                with open(history_file, 'r', encoding='utf-8') as f:
-                    return json.load(f)
-            return {}
+            cursor = self.conn.cursor()
+            cursor.execute('SELECT * FROM compression_history')
+            rows = cursor.fetchall()
+            
+            # 转换为字典格式
+            history = {}
+            columns = [description[0] for description in cursor.description]
+            
+            for row in rows:
+                record = dict(zip(columns, row))
+                file_path = record.pop('file_path')  # 移除并获取文件路径
+                history[file_path] = record
+            
+            return history
         except Exception as e:
             print(f"加载压缩历史失败：{e}")
             return {}
@@ -720,6 +728,8 @@ class VideoInfoWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        # 初始化数据库
+        self.init_database()
         # 先定义所有需要的方法
         self.init_methods()
         
@@ -880,32 +890,25 @@ class MainWindow(QMainWindow):
     def init_methods(self):
         """初始化所有需要的方法"""
         def save_compression_history(self, file_path, compression_info):
-            """保存压缩历史到JSON文件"""
-            history_file = "compression_history.json"
+            """保存压缩历史到SQLite数据库"""
             try:
-                # 读取现有历史记录
-                if os.path.exists(history_file):
-                    with open(history_file, 'r', encoding='utf-8') as f:
-                        history = json.load(f)
-                else:
-                    history = {}
-
-                # 如果是文件不存在的错误，不保存
-                if compression_info.get('status') == "文件不存在":
+                # 如果是文件不存在或无需压缩的状态，不保存
+                if compression_info.get('status') in ["文件不存在", "无需压缩"]:
                     return
 
-                # 如果是"无需压缩"状态，不保存
-                if compression_info.get('status') == "无需压缩":
+                cursor = self.conn.cursor()
+                
+                # 检查是否已存在记录
+                cursor.execute('SELECT status FROM compression_history WHERE file_path = ?', (file_path,))
+                existing_record = cursor.fetchone()
+                
+                # 如果记录存在且状态为"完成"，只在新状态也是"完成"时才更新
+                if existing_record and existing_record[0] == "完成" and compression_info.get('status') != "完成":
                     return
 
-                # 如果文件路径已存在且状态为"完成"，只在新状态也是"完成"时才更新
-                if file_path in history:
-                    existing_record = history[file_path]
-                    if existing_record.get('status') == "完成" and compression_info.get('status') != "完成":
-                        return
-
-                # 更新历史记录，保存所有表格字段
-                history[file_path] = {
+                # 准备数据
+                data = {
+                    'file_path': file_path,
                     'file_name': os.path.basename(file_path),
                     'duration': compression_info.get('duration', ''),
                     'original_size': compression_info.get('original_size', 0),
@@ -918,24 +921,39 @@ class MainWindow(QMainWindow):
                     'compression_time': datetime.datetime.now().isoformat()
                 }
 
-                # 清理空值
-                history[file_path] = {k: v for k, v in history[file_path].items() if v not in [None, '', 0]}
+                # 清理空值和0值
+                data = {k: v for k, v in data.items() if v not in [None, '', 0]}
 
-                # 保存更新后的历史记录
-                with open(history_file, 'w', encoding='utf-8') as f:
-                    json.dump(history, f, ensure_ascii=False, indent=2)
+                # 构建SQL语句
+                fields = ', '.join(data.keys())
+                placeholders = ', '.join(['?' for _ in data])
+                values = tuple(data.values())
+
+                # 使用REPLACE语法进行插入或更新
+                sql = f'REPLACE INTO compression_history ({fields}) VALUES ({placeholders})'
+                cursor.execute(sql, values)
+                self.conn.commit()
 
             except Exception as e:
                 print(f"保存压缩历史失败：{e}")
 
         def load_compression_history(self):
-            """从JSON文件加载压缩历史"""
-            history_file = "compression_history.json"
+            """从SQLite数据库加载压缩历史"""
             try:
-                if os.path.exists(history_file):
-                    with open(history_file, 'r', encoding='utf-8') as f:
-                        return json.load(f)
-                return {}
+                cursor = self.conn.cursor()
+                cursor.execute('SELECT * FROM compression_history')
+                rows = cursor.fetchall()
+                
+                # 转换为字典格式
+                history = {}
+                columns = [description[0] for description in cursor.description]
+                
+                for row in rows:
+                    record = dict(zip(columns, row))
+                    file_path = record.pop('file_path')  # 移除并获取文件路径
+                    history[file_path] = record
+                
+                return history
             except Exception as e:
                 print(f"加载压缩历史失败：{e}")
                 return {}
@@ -1523,20 +1541,16 @@ class MainWindow(QMainWindow):
         # self.update_file_list()
 
     def closeEvent(self, event):
-        """程序关闭时保存设置"""
-        # 检查压缩线程是否存在并且正在运行
-        if hasattr(self, 'compress_thread') and self.compress_thread is not None:
-            try:
-                if self.compress_thread.isRunning():
-                    self.compress_thread.stop()
-                    self.compress_thread.wait()
-            except Exception as e:
-                print(f"停止压缩线程失败：{e}")
-        
-        # 保存树形控件状态到单独的文件
-        self.save_tree_state()
-        
+        """程序关闭时的处理"""
+        # 关闭数据库连接
+        try:
+            if hasattr(self, 'conn'):
+                self.conn.close()
+        except Exception as e:
+            print(f"关闭数据库连接失败：{e}")
+            
         # 保存其他设置
+        self.save_tree_state()
         self.save_settings()
         event.accept()
 
@@ -1936,7 +1950,30 @@ class MainWindow(QMainWindow):
             iterator += 1
         
         self.selection_info_label.setText(f"已选择: {checked_count} 个视频")
-        print(f"更新选中数量：{checked_count}")  # 添加调试输出
+
+    def init_database(self):
+        """初始化SQLite数据库"""
+        try:
+            self.conn = sqlite3.connect('compression_history.db')
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS compression_history (
+                    file_path TEXT PRIMARY KEY,
+                    file_name TEXT,
+                    duration TEXT,
+                    original_size INTEGER,
+                    original_bitrate REAL,
+                    target_bitrate REAL,
+                    compressed_size INTEGER,
+                    compression_ratio REAL,
+                    impact_level TEXT,
+                    status TEXT,
+                    compression_time TEXT
+                )
+            ''')
+            self.conn.commit()
+        except Exception as e:
+            print(f"初始化数据库失败：{e}")
 
 def format_size(size_in_bytes):
     """格式化文件大小显示"""
