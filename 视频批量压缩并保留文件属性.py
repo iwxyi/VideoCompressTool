@@ -727,6 +727,18 @@ class MainWindow(QMainWindow):
         self.expand_button.setFixedWidth(100)
         options_layout.addWidget(self.expand_button)
         
+        # 添加全选按钮
+        self.select_all_button = QPushButton("全选")
+        self.select_all_button.clicked.connect(self.select_all_items)
+        self.select_all_button.setFixedWidth(60)
+        options_layout.addWidget(self.select_all_button)
+        
+        # 添加反选按钮
+        self.invert_selection_button = QPushButton("反选")
+        self.invert_selection_button.clicked.connect(self.invert_selection)
+        self.invert_selection_button.setFixedWidth(60)
+        options_layout.addWidget(self.invert_selection_button)
+        
         # 添加弹性空间
         options_layout.addStretch()
         
@@ -1681,6 +1693,85 @@ class MainWindow(QMainWindow):
             print(f"正在预览视频：{file_path}")
         except Exception as e:
             print(f"预览视频失败：{e}")
+
+    def select_all_items(self):
+        """全选或取消全选所有项目"""
+        self.tree.blockSignals(True)  # 暂时阻止信号以提高性能
+        
+        # 检查当前是否全部选中
+        all_checked = True
+        iterator = QTreeWidgetItemIterator(self.tree)
+        while iterator.value():
+            item = iterator.value()
+            if item.childCount() == 0:  # 只检查文件项目
+                if item.checkState(0) != Qt.CheckState.Checked:
+                    all_checked = False
+                    break
+            iterator += 1
+        
+        # 根据当前状态决定是全选还是取消全选
+        new_state = Qt.CheckState.Unchecked if all_checked else Qt.CheckState.Checked
+        
+        def set_check_state(item, state):
+            item.setCheckState(0, state)
+            for i in range(item.childCount()):
+                set_check_state(item.child(i), state)
+        
+        # 遍历所有顶层项目
+        for i in range(self.tree.topLevelItemCount()):
+            set_check_state(self.tree.topLevelItem(i), new_state)
+        
+        self.tree.blockSignals(False)  # 恢复信号
+        # 手动触发一次更新
+        if self.tree.topLevelItemCount() > 0:
+            self.on_item_changed(self.tree.topLevelItem(0), 0)
+
+    def invert_selection(self):
+        """反选所有项目"""
+        self.tree.blockSignals(True)  # 暂时阻止信号以提高性能
+        
+        def invert_check_state(item):
+            # 只反选文件项目，不反选文件夹
+            if item.childCount() == 0:  # 如果是文件
+                current_state = item.checkState(0)
+                new_state = Qt.CheckState.Unchecked if current_state == Qt.CheckState.Checked else Qt.CheckState.Checked
+                item.setCheckState(0, new_state)
+            
+            # 递归处理子项目
+            for i in range(item.childCount()):
+                invert_check_state(item.child(i))
+                
+            # 如果是文件夹，根据子项目状态更新自身状态
+            if item.childCount() > 0:
+                checked_count = 0
+                total_files = 0
+                
+                def count_files(folder_item):
+                    nonlocal checked_count, total_files
+                    for i in range(folder_item.childCount()):
+                        child = folder_item.child(i)
+                        if child.childCount() == 0:  # 如果是文件
+                            total_files += 1
+                            if child.checkState(0) == Qt.CheckState.Checked:
+                                checked_count += 1
+                        else:  # 如果是文件夹
+                            count_files(child)
+                
+                count_files(item)
+                
+                if total_files > 0:
+                    if checked_count == total_files:
+                        item.setCheckState(0, Qt.CheckState.Checked)
+                    elif checked_count == 0:
+                        item.setCheckState(0, Qt.CheckState.Unchecked)
+                    else:
+                        item.setCheckState(0, Qt.CheckState.PartiallyChecked)
+        
+        # 遍历所有顶层项目
+        for i in range(self.tree.topLevelItemCount()):
+            invert_check_state(self.tree.topLevelItem(i))
+        
+        self.tree.blockSignals(False)  # 恢复信号
 
 def format_size(size_in_bytes):
     """格式化文件大小显示"""
