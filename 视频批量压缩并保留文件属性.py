@@ -3,12 +3,17 @@ import shutil
 import time
 import subprocess
 import json
-from PyQt6.QtWidgets import (QApplication, QMainWindow, QPushButton, QVBoxLayout, 
-                            QHBoxLayout, QWidget, QFileDialog, QTreeWidget, 
-                            QTreeWidgetItem, QLabel, QCheckBox, QHeaderView,
-                            QDoubleSpinBox, QTreeWidgetItemIterator, QStyle)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot, QByteArray, QSize
-from PyQt6.QtGui import QPixmap, QColor
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QPushButton, QVBoxLayout,
+    QWidget, QLabel, QFileDialog, QHBoxLayout, QSpinBox,
+    QDoubleSpinBox, QCheckBox, QTreeWidget, QTreeWidgetItem,
+    QHeaderView, QStyle, QProgressBar, QMessageBox,
+    QStatusBar, QTreeWidgetItemIterator
+)
+from PyQt6.QtCore import (
+    Qt, QThread, pyqtSignal, QSize, QTimer
+)
+from PyQt6.QtGui import QColor, QPixmap
 import platform
 import datetime
 
@@ -636,6 +641,62 @@ class ThumbnailLoader(QThread):
         except Exception as e:
             print(f"生成缩略图失败：{e}")
 
+class VideoInfoWorker(QThread):
+    """异步获取视频信息的工作线程"""
+    info_ready = pyqtSignal(str)
+    
+    def __init__(self, file_path):
+        super().__init__()
+        self.file_path = file_path
+        
+    def run(self):
+        try:
+            command = [
+                'ffprobe',
+                '-v', 'error',
+                '-select_streams', 'v:0',
+                '-show_entries', 'stream=width,height,r_frame_rate,duration',
+                '-of', 'json',
+                self.file_path
+            ]
+            
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode == 0:
+                info = json.loads(result.stdout)
+                if 'streams' in info and info['streams']:
+                    stream = info['streams'][0]
+                    
+                    # 获取分辨率
+                    width = stream.get('width', 'N/A')
+                    height = stream.get('height', 'N/A')
+                    resolution = f"{width}x{height}" if width != 'N/A' else 'N/A'
+                    
+                    # 获取帧率
+                    fps = 'N/A'
+                    if 'r_frame_rate' in stream:
+                        try:
+                            num, den = map(int, stream['r_frame_rate'].split('/'))
+                            fps = f"{num/den:.2f}"
+                        except:
+                            pass
+                    
+                    # 获取时长
+                    duration = 'N/A'
+                    if 'duration' in stream:
+                        try:
+                            duration = f"{float(stream['duration']):.2f}"
+                        except:
+                            pass
+                    
+                    # 生成信息文本
+                    info_text = f"分辨率: {resolution} | 帧率: {fps} fps | 时长: {duration}s"
+                    self.info_ready.emit(info_text)
+                else:
+                    self.info_ready.emit("无法获取视频信息")
+        except Exception as e:
+            print(f"获取视频信息失败：{e}")
+            self.info_ready.emit("获取视频信息失败")
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -776,6 +837,25 @@ class MainWindow(QMainWindow):
         self.tree.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # 连接键盘事件处理函数
         self.tree.keyPressEvent = self.tree_key_press_event
+
+        # 添加状态栏
+        self.statusBar = QStatusBar()
+        self.setStatusBar(self.statusBar)
+        
+        # 创建状态栏的标签
+        self.video_info_label = QLabel()
+        self.selection_info_label = QLabel()
+        
+        # 添加标签到状态栏
+        self.statusBar.addWidget(self.video_info_label)
+        self.statusBar.addPermanentWidget(self.selection_info_label)
+        
+        # 连接树形控件的选择变化信号
+        self.tree.itemSelectionChanged.connect(self.update_status_bar)
+        self.tree.itemChanged.connect(self.update_selection_count)
+
+        # 用于存储当前的视频信息工作线程
+        self.current_info_worker = None
 
     def init_methods(self):
         """初始化所有需要的方法"""
@@ -999,7 +1079,11 @@ class MainWindow(QMainWindow):
             tree_state = {
                 'expanded': [],  # 展开的节点路径列表
                 'checked': [],   # 选中的节点路径列表
-                'partially_checked': []  # 部分选中的节点路径列表
+                'partially_checked': [],  # 部分选中的节点路径列表
+                'scroll_position': {  # 添加滚动位置
+                    'horizontal': self.tree.horizontalScrollBar().value(),
+                    'vertical': self.tree.verticalScrollBar().value()
+                }
             }
             
             # 遍历所有项目（包括子项目）
@@ -1026,7 +1110,8 @@ class MainWindow(QMainWindow):
                 json.dump(tree_state, f, ensure_ascii=False, indent=4)
                 print(f"保存树形控件状态：展开 {len(tree_state['expanded'])} 项，"
                       f"选中 {len(tree_state['checked'])} 项，"
-                      f"部分选中 {len(tree_state['partially_checked'])} 项")
+                      f"部分选中 {len(tree_state['partially_checked'])} 项，"
+                      f"滚动位置 {tree_state['scroll_position']}")
             
         except Exception as e:
             print(f"保存树形控件状态失败：{e}")
@@ -1040,10 +1125,12 @@ class MainWindow(QMainWindow):
                     expanded_paths = set(tree_state.get('expanded', []))
                     checked_paths = set(tree_state.get('checked', []))
                     partially_checked_paths = set(tree_state.get('partially_checked', []))
+                    scroll_position = tree_state.get('scroll_position', {'horizontal': 0, 'vertical': 0})
                     
                     print(f"正在恢复树形控件状态：展开 {len(expanded_paths)} 项，"
                           f"选中 {len(checked_paths)} 项，"
-                          f"部分选中 {len(partially_checked_paths)} 项")
+                          f"部分选中 {len(partially_checked_paths)} 项，"
+                          f"滚动位置 {scroll_position}")
                     
                     # 暂时阻止项目变化信号
                     self.tree.blockSignals(True)
@@ -1072,6 +1159,9 @@ class MainWindow(QMainWindow):
                     # 恢复信号
                     self.tree.blockSignals(False)
                     
+                    # 恢复滚动位置
+                    QTimer.singleShot(100, lambda: self.restore_scroll_position(scroll_position))
+                    
                     # 更新展开/折叠按钮的文本
                     any_expanded = False
                     iterator = QTreeWidgetItemIterator(self.tree)
@@ -1085,6 +1175,14 @@ class MainWindow(QMainWindow):
                     
         except Exception as e:
             print(f"恢复树形控件状态失败：{e}")
+
+    def restore_scroll_position(self, scroll_position):
+        """恢复滚动位置"""
+        try:
+            self.tree.horizontalScrollBar().setValue(scroll_position.get('horizontal', 0))
+            self.tree.verticalScrollBar().setValue(scroll_position.get('vertical', 0))
+        except Exception as e:
+            print(f"恢复滚动位置失败：{e}")
 
     def select_source_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "选择源文件夹", self.source_folder)  # 使用上次的路径作为默认值
@@ -1664,6 +1762,9 @@ class MainWindow(QMainWindow):
         # 恢复信号
         self.tree.blockSignals(False)
 
+        # 更新选中数量
+        self.update_selection_count()
+
     def tree_key_press_event(self, event):
         """处理树形控件的键盘事件"""
         if event.key() == Qt.Key.Key_Space:
@@ -1772,6 +1873,49 @@ class MainWindow(QMainWindow):
             invert_check_state(self.tree.topLevelItem(i))
         
         self.tree.blockSignals(False)  # 恢复信号
+
+    def update_status_bar(self):
+        """更新状态栏显示当前选中视频的信息"""
+        # 停止当前正在运行的工作线程（如果有）
+        if self.current_info_worker is not None:
+            self.current_info_worker.quit()
+            self.current_info_worker.wait()
+            self.current_info_worker = None
+        
+        selected_items = self.tree.selectedItems()
+        if not selected_items:
+            self.video_info_label.setText("")
+            return
+            
+        current_item = selected_items[0]
+        if current_item.childCount() > 0:  # 如果是文件夹
+            self.video_info_label.setText("")
+            return
+            
+        file_path = current_item.data(0, Qt.ItemDataRole.UserRole)
+        if not file_path or not os.path.exists(file_path):
+            self.video_info_label.setText("")
+            return
+        
+        # 创建并启动新的工作线程
+        self.current_info_worker = VideoInfoWorker(file_path)
+        self.current_info_worker.info_ready.connect(self.video_info_label.setText)
+        self.current_info_worker.start()
+
+    def update_selection_count(self, item=None, column=None):
+        """更新选中视频数量显示"""
+        if column is not None and column != 0:  # 如果不是复选框列，忽略
+            return
+            
+        checked_count = 0
+        iterator = QTreeWidgetItemIterator(self.tree)
+        while iterator.value():
+            item = iterator.value()
+            if item.childCount() == 0 and item.checkState(0) == Qt.CheckState.Checked:  # 只统计选中的文件
+                checked_count += 1
+            iterator += 1
+        
+        self.selection_info_label.setText(f"已选择: {checked_count} 个视频")
 
 def format_size(size_in_bytes):
     """格式化文件大小显示"""
