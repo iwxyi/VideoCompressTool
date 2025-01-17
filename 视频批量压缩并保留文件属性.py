@@ -651,11 +651,15 @@ class VideoInfoWorker(QThread):
         
     def run(self):
         try:
+            # 获取文件大小
+            file_size = os.path.getsize(self.file_path)
+            size_str = self.format_size(file_size)
+            
             command = [
                 'ffprobe',
                 '-v', 'error',
                 '-select_streams', 'v:0',
-                '-show_entries', 'stream=width,height,r_frame_rate,duration',
+                '-show_entries', 'stream=width,height,r_frame_rate,duration,bit_rate',
                 '-of', 'json',
                 self.file_path
             ]
@@ -687,15 +691,31 @@ class VideoInfoWorker(QThread):
                             duration = f"{float(stream['duration']):.2f}"
                         except:
                             pass
+                            
+                    # 获取比特率
+                    bitrate = 'N/A'
+                    if 'bit_rate' in stream:
+                        try:
+                            bitrate = f"{int(stream['bit_rate'])/1024/1024:.2f}"
+                        except:
+                            pass
                     
                     # 生成信息文本
-                    info_text = f"分辨率: {resolution} | 帧率: {fps} fps | 时长: {duration}s"
+                    info_text = f"分辨率: {resolution} | 帧率: {fps} fps | 时长: {duration}s | 大小: {size_str} | 比特率: {bitrate} Mbps"
                     self.info_ready.emit(info_text)
                 else:
                     self.info_ready.emit("无法获取视频信息")
         except Exception as e:
             print(f"获取视频信息失败：{e}")
             self.info_ready.emit("获取视频信息失败")
+    
+    def format_size(self, size):
+        """格式化文件大小显示"""
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size < 1024.0:
+                return f"{size:.2f} {unit}"
+            size /= 1024.0
+        return f"{size:.2f} PB"
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -1172,6 +1192,9 @@ class MainWindow(QMainWindow):
                         iterator += 1
                     
                     self.expand_button.setText("折叠全部" if any_expanded else "展开全部")
+                    
+                    # 更新选中数量显示
+                    self.update_selection_count()
                     
         except Exception as e:
             print(f"恢复树形控件状态失败：{e}")
