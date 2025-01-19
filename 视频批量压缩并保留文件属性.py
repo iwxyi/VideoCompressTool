@@ -486,7 +486,6 @@ class VideoCompressThread(QThread):
         try:
             # 保存原始文件的修改时间
             original_mtime = os.path.getmtime(input_path)
-            print(f"\n原始文件修改时间：{time.ctime(original_mtime)}")
             
             # 先获取原始文件的所有元数据
             probe_command = [
@@ -560,11 +559,10 @@ class VideoCompressThread(QThread):
                 
                 # 检查临时文件的修改时间
                 temp_mtime = os.path.getmtime(temp_path)
-                print(f"临时文件修改时间：{time.ctime(temp_mtime)}")
                 
                 # 比较修改时间，允许1秒的误差
                 if abs(original_mtime - temp_mtime) > 1:
-                    print(f"\n警告：文件修改时间不一致！")
+                    print(f"警告：文件修改时间不一致！")
                     print(f"原始文件：{time.ctime(original_mtime)}")
                     print(f"临时文件：{time.ctime(temp_mtime)}")
                     print("取消覆盖操作")
@@ -578,10 +576,9 @@ class VideoCompressThread(QThread):
                 
                 # 再次检查最终文件的修改时间
                 final_mtime = os.path.getmtime(output_path)
-                print(f"最终文件修改时间：{time.ctime(final_mtime)}")
                 
                 if abs(original_mtime - final_mtime) > 1:
-                    print(f"\n警告：最终文件修改时间不一致！")
+                    print(f"警告：最终文件修改时间不一致！")
                     print(f"原始文件：{time.ctime(original_mtime)}")
                     print(f"最终文件：{time.ctime(final_mtime)}")
                     # 尝试再次修正时间
@@ -619,7 +616,6 @@ class VideoCompressThread(QThread):
         try:
             # 保存原始文件的修改时间
             original_mtime = os.path.getmtime(input_path)
-            print(f"\n原始文件修改时间：{time.ctime(original_mtime)}")
             
             # 获取原始文件的所有元数据
             probe_command = [
@@ -682,7 +678,7 @@ class VideoCompressThread(QThread):
                 # 检查临时文件的修改时间
                 temp_mtime = os.path.getmtime(temp_path)
                 if abs(original_mtime - temp_mtime) > 1:
-                    print(f"\n警告：文件修改时间不一致！")
+                    print(f"警告：文件修改时间不一致！")
                     print(f"原始文件：{time.ctime(original_mtime)}")
                     print(f"临时文件：{time.ctime(temp_mtime)}")
                     print("取消覆盖操作")
@@ -696,7 +692,7 @@ class VideoCompressThread(QThread):
                 # 检查最终文件的修改时间
                 final_mtime = os.path.getmtime(output_path)
                 if abs(original_mtime - final_mtime) > 1:
-                    print(f"\n警告：最终文件修改时间不一致！")
+                    print(f"警告：最终文件修改时间不一致！")
                     print(f"原始文件：{time.ctime(original_mtime)}")
                     print(f"最终文件：{time.ctime(final_mtime)}")
                     # 尝试修正时间
