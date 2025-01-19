@@ -17,6 +17,7 @@ from PyQt6.QtGui import QColor, QPixmap
 import platform
 import datetime
 import sqlite3  # 添加 sqlite3 导入
+import multiprocessing
 
 
 """
@@ -64,11 +65,19 @@ class VideoCompressThread(QThread):
         self.tree = tree_widget
         self.is_running = True
         self.current_process = None
+        # 从主窗口获取当前设置的 CPU 核心数
+        window = tree_widget.window()
+        self.cpu_cores = window.cpu_spin.value() if window else max(1, multiprocessing.cpu_count() // 2)
 
     def update_quantization_coef(self, new_coef):
         """更新量化系数"""
         self.quantization_coef = new_coef
         print(f"量化系数已更新为：{new_coef}")
+
+    def update_cpu_cores(self, new_cores):
+        """更新 CPU 核心数"""
+        self.cpu_cores = new_cores
+        print(f"CPU 核心数已更新为：{new_cores}")
 
     def run(self):
         if not os.path.exists(self.target_folder):
@@ -215,7 +224,7 @@ class VideoCompressThread(QThread):
                     self.progress_signal.emit(progress_data)
 
                     # 直接压缩为目标文件
-                    try:
+                    try:                        
                         # 添加 -progress pipe:1 参数来输出进度信息
                         command = [
                             'ffmpeg', '-i', input_video_path,
@@ -227,6 +236,7 @@ class VideoCompressThread(QThread):
                             '-loglevel', 'error',  # 只显示错误信息
                             '-y',  # 自动覆盖
                             '-pix_fmt', 'yuv420p',  # 使用更通用的像素格式
+                            '-threads', str(self.cpu_cores),  # 添加线程数参数
                             output_video_path
                         ]
                         creation_flags = subprocess.CREATE_NO_WINDOW if platform.system() == 'Windows' else 0
@@ -248,8 +258,8 @@ class VideoCompressThread(QThread):
                                 import select
                                 reads, _, _ = select.select([self.current_process.stdout], [], [], 0.1)
                                 if not reads:
-                                    # 检查是否超过30秒没有进度更新
-                                    if time.time() - last_progress_time > 30:
+                                    # 检查是否超过60秒没有进度更新
+                                    if time.time() - last_progress_time > 60:
                                         print("压缩进程可能已经卡住，正在终止...")
                                         self.current_process.terminate()
                                         break
@@ -822,6 +832,9 @@ class VideoCompressThread(QThread):
                 self.coef_spin.setValue(settings.get('quantization_coef', 0.12))
                 self.replace_source_cb.setChecked(settings.get('replace_source', False))
                 self.show_thumbnail_cb.setChecked(settings.get('show_thumbnail', True))
+                # 加载 CPU 核心数设置
+                cpu_cores = settings.get('cpu_cores', max(1, multiprocessing.cpu_count() // 2))
+                self.cpu_spin.setValue(cpu_cores)
                 if self.source_folder:
                     self.source_path_label.setText(f"源文件夹：{self.source_folder}")
                     self.update_file_list()
@@ -830,6 +843,8 @@ class VideoCompressThread(QThread):
             self.coef_spin.setValue(0.12)
             self.replace_source_cb.setChecked(False)
             self.show_thumbnail_cb.setChecked(True)
+            # 设置默认 CPU 核心数
+            self.cpu_spin.setValue(max(1, multiprocessing.cpu_count() // 2))
 
 class ThumbnailLoader(QThread):
     thumbnail_ready = pyqtSignal(object, QPixmap)
@@ -961,14 +976,18 @@ class MainWindow(QMainWindow):
         # 文件夹选择区域
         folder_layout = QHBoxLayout()
         self.source_path_label = QLabel("源文件夹：")
-        self.source_path_button = QPushButton("选择文件夹")
+        self.source_path_button = QPushButton("选择")  # 改为更短的按钮文字
+        self.source_path_button.setFixedWidth(60)  # 设置固定宽度
         self.source_path_button.clicked.connect(self.select_source_folder)
         folder_layout.addWidget(self.source_path_label)
         folder_layout.addWidget(self.source_path_button)
+        folder_layout.addStretch()  # 添加弹性空间
         layout.addLayout(folder_layout)
 
-        # 量化系数设置区域
-        coef_layout = QHBoxLayout()
+        # 将量化系数和CPU核心数放在同一行
+        params_layout = QHBoxLayout()
+        
+        # 量化系数设置
         coef_label = QLabel("量化系数(0.07-0.15)：")
         self.coef_spin = QDoubleSpinBox()
         self.coef_spin.setRange(0.01, 1.00)
@@ -981,11 +1000,25 @@ class MainWindow(QMainWindow):
         self.coef_warning = QLabel("")
         self.coef_warning.setStyleSheet("color: red")
         
-        coef_layout.addWidget(coef_label)
-        coef_layout.addWidget(self.coef_spin)
-        coef_layout.addWidget(self.coef_warning)
-        coef_layout.addStretch()
-        layout.addLayout(coef_layout)
+        params_layout.addWidget(coef_label)
+        params_layout.addWidget(self.coef_spin)
+        params_layout.addWidget(self.coef_warning)
+        
+        # 添加一些间距
+        params_layout.addSpacing(20)
+        
+        # CPU核心数设置
+        cpu_label = QLabel("CPU核心数:")
+        self.cpu_spin = QSpinBox()
+        self.cpu_spin.setMinimum(1)
+        self.cpu_spin.setMaximum(multiprocessing.cpu_count())
+        self.cpu_spin.setValue(max(1, multiprocessing.cpu_count() // 2))
+        self.cpu_spin.valueChanged.connect(self.on_cpu_changed)
+        params_layout.addWidget(cpu_label)
+        params_layout.addWidget(self.cpu_spin)
+        
+        params_layout.addStretch()  # 添加弹性空间
+        layout.addLayout(params_layout)
 
         # 将表格改为树形结构
         self.tree = QTreeWidget()
@@ -1232,6 +1265,9 @@ class MainWindow(QMainWindow):
                 self.coef_spin.setValue(settings.get('quantization_coef', 0.12))
                 self.replace_source_cb.setChecked(settings.get('replace_source', False))
                 self.show_thumbnail_cb.setChecked(settings.get('show_thumbnail', True))
+                # 加载 CPU 核心数设置
+                cpu_cores = settings.get('cpu_cores', max(1, multiprocessing.cpu_count() // 2))
+                self.cpu_spin.setValue(cpu_cores)
                 if self.source_folder:
                     self.source_path_label.setText(f"源文件夹：{self.source_folder}")
                     self.update_file_list()
@@ -1240,6 +1276,8 @@ class MainWindow(QMainWindow):
             self.coef_spin.setValue(0.12)
             self.replace_source_cb.setChecked(False)
             self.show_thumbnail_cb.setChecked(True)
+            # 设置默认 CPU 核心数
+            self.cpu_spin.setValue(max(1, multiprocessing.cpu_count() // 2))
 
     def load_window_settings(self):
         """加载窗口设置"""
@@ -1349,7 +1387,8 @@ class MainWindow(QMainWindow):
                         'x': self.x(),
                         'y': self.y()
                     }
-                }
+                },
+                'cpu_cores': self.cpu_spin.value()  # 保存 CPU 核心数设置
             })
             
             with open(self.settings_file, 'w', encoding='utf-8') as f:
@@ -2313,6 +2352,25 @@ class MainWindow(QMainWindow):
             self.conn.commit()
         except Exception as e:
             print(f"初始化数据库失败：{e}")
+
+    def on_cpu_changed(self, new_value):
+        """处理 CPU 核心数变化"""
+        try:
+            settings = {}
+            if os.path.exists(self.settings_file):
+                with open(self.settings_file, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+            
+            settings['cpu_cores'] = new_value
+            
+            with open(self.settings_file, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, ensure_ascii=False, indent=4)
+            
+            # 如果压缩线程正在运行，更新其 CPU 核心数设置
+            if hasattr(self, 'compress_thread') and self.compress_thread is not None:
+                self.compress_thread.update_cpu_cores(new_value)
+        except Exception as e:
+            print(f"保存 CPU 核心数设置失败：{e}")
 
 def format_size(size_in_bytes):
     """格式化文件大小显示"""
