@@ -484,20 +484,65 @@ class VideoCompressThread(QThread):
     def copy_video_metadata(self, input_path, output_path):
         """复制视频的所有元数据信息，包括拍摄设备、相机镜头等所有元数据"""
         try:
-            # 使用ffmpeg复制所有元数据和流信息，简化命令并添加必要的参数
+            # 保存原始文件的修改时间
+            original_mtime = os.path.getmtime(input_path)
+            print(f"\n原始文件修改时间：{time.ctime(original_mtime)}")
+            
+            # 先获取原始文件的所有元数据
+            probe_command = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                '-show_streams',
+                input_path
+            ]
+            
+            probe_result = subprocess.run(probe_command, capture_output=True, text=True)
+            metadata = {}
+            if probe_result.returncode == 0:
+                try:
+                    probe_data = json.loads(probe_result.stdout)
+                    # 收集格式元数据
+                    if 'format' in probe_data and 'tags' in probe_data['format']:
+                        metadata.update(probe_data['format']['tags'])
+                    # 收集流元数据
+                    if 'streams' in probe_data:
+                        for stream in probe_data['streams']:
+                            if 'tags' in stream:
+                                metadata.update(stream['tags'])
+                except json.JSONDecodeError:
+                    print("解析元数据失败")
+
+            # 构建元数据参数
+            metadata_args = []
+            for key, value in metadata.items():
+                # 处理特殊字符
+                value = value.replace('"', '\\"')
+                metadata_args.extend(['-metadata', f'{key}={value}'])
+
+            # 使用ffmpeg复制所有元数据和流信息
             command = [
                 'ffmpeg', 
                 '-i', input_path,  # 输入原始文件
                 '-i', output_path,  # 压缩后的文件
                 '-map', '1:v',  # 使用压缩后的视频流
                 '-map', '1:a?',  # 使用压缩后的音频流（如果存在）
-                '-map_metadata:g', '0',  # 只复制全局元数据
-                '-c', 'copy',  # 仅复制，不重新编码
+                '-map_metadata', '0',  # 复制全局元数据
+                '-map_metadata:s', '0',  # 复制流元数据
+                '-c', 'copy'  # 仅复制，不重新编码
+            ]
+            
+            # 添加所有收集到的元数据
+            command.extend(metadata_args)
+            
+            # 添加其他必要参数
+            command.extend([
                 '-movflags', '+faststart',  # 优化文件结构
                 '-ignore_editlist', '1',  # 忽略编辑列表
                 '-y',  # 自动覆盖
                 f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"
-            ]
+            ])
             
             # 执行命令
             result = subprocess.run(command, capture_output=True, text=True)
@@ -506,26 +551,59 @@ class VideoCompressThread(QThread):
                 # 尝试使用更简单的方式重试
                 return self.simple_copy_metadata(input_path, output_path)
             
-            # 替换原文件
+            # 在替换文件之前，检查修改时间
             try:
                 temp_path = f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"
                 
-                # 在Windows系统中，需要先删除目标文件
+                # 复制文件时间属性和其他文件系统属性到临时文件
+                shutil.copystat(input_path, temp_path)
+                
+                # 检查临时文件的修改时间
+                temp_mtime = os.path.getmtime(temp_path)
+                print(f"临时文件修改时间：{time.ctime(temp_mtime)}")
+                
+                # 比较修改时间，允许1秒的误差
+                if abs(original_mtime - temp_mtime) > 1:
+                    print(f"\n警告：文件修改时间不一致！")
+                    print(f"原始文件：{time.ctime(original_mtime)}")
+                    print(f"临时文件：{time.ctime(temp_mtime)}")
+                    print("取消覆盖操作")
+                    return False
+                
+                # 修改时间一致，继续替换操作
                 if platform.system() == 'Windows' and os.path.exists(output_path):
                     os.remove(output_path)
                 
                 os.rename(temp_path, output_path)
                 
-                # 复制文件时间属性和其他文件系统属性
-                shutil.copystat(input_path, output_path)
+                # 再次检查最终文件的修改时间
+                final_mtime = os.path.getmtime(output_path)
+                print(f"最终文件修改时间：{time.ctime(final_mtime)}")
                 
+                if abs(original_mtime - final_mtime) > 1:
+                    print(f"\n警告：最终文件修改时间不一致！")
+                    print(f"原始文件：{time.ctime(original_mtime)}")
+                    print(f"最终文件：{time.ctime(final_mtime)}")
+                    # 尝试再次修正时间
+                    os.utime(output_path, (os.path.getatime(input_path), original_mtime))
+                    
+                    # 最后检查一次
+                    final_check_mtime = os.path.getmtime(output_path)
+                    if abs(original_mtime - final_check_mtime) > 1:
+                        print("无法修正文件时间，操作失败")
+                        return False
+                    else:
+                        print("文件时间已修正")
+                
+                print("\n元数据复制完成，文件时间一致")
                 return True
+                
             except Exception as e:
-                print(f"替换文件失败：{e}")
+                print(f"\n替换文件失败：{e}")
                 return False
                 
         except Exception as e:
-            print(f"复制元数据失败：{e}")
+            print(f"\n复制元数据失败：{e}")
             return self.simple_copy_metadata(input_path, output_path)
         finally:
             # 清理可能存在的临时文件
@@ -534,23 +612,64 @@ class VideoCompressThread(QThread):
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
             except Exception as e:
-                print(f"清理临时文件失败：{e}")
+                print(f"\n清理临时文件失败：{e}")
 
     def simple_copy_metadata(self, input_path, output_path):
         """使用更简单的方式复制元数据（作为备选方案）"""
         try:
+            # 保存原始文件的修改时间
+            original_mtime = os.path.getmtime(input_path)
+            print(f"\n原始文件修改时间：{time.ctime(original_mtime)}")
+            
+            # 获取原始文件的所有元数据
+            probe_command = [
+                'ffprobe',
+                '-v', 'quiet',
+                '-print_format', 'json',
+                '-show_format',
+                '-show_streams',
+                input_path
+            ]
+            
+            probe_result = subprocess.run(probe_command, capture_output=True, text=True)
+            metadata = {}
+            if probe_result.returncode == 0:
+                try:
+                    probe_data = json.loads(probe_result.stdout)
+                    if 'format' in probe_data and 'tags' in probe_data['format']:
+                        metadata.update(probe_data['format']['tags'])
+                    if 'streams' in probe_data:
+                        for stream in probe_data['streams']:
+                            if 'tags' in stream:
+                                metadata.update(stream['tags'])
+                except json.JSONDecodeError:
+                    print("解析元数据失败")
+
+            # 构建元数据参数
+            metadata_args = []
+            for key, value in metadata.items():
+                value = value.replace('"', '\\"')
+                metadata_args.extend(['-metadata', f'{key}={value}'])
+
             command = [
                 'ffmpeg',
                 '-i', input_path,
                 '-i', output_path,
                 '-map', '1',  # 使用第二个输入的所有流
-                '-map_metadata:g', '0',  # 只复制全局元数据
+                '-map_metadata', '0'  # 复制全局元数据
+            ]
+            
+            # 添加所有收集到的元数据
+            command.extend(metadata_args)
+            
+            # 添加其他必要参数
+            command.extend([
                 '-c', 'copy',
                 '-movflags', '+faststart',
                 '-ignore_editlist', '1',
                 '-y',
                 f"{os.path.splitext(output_path)[0]}_temp{os.path.splitext(output_path)[1]}"
-            ]
+            ])
             
             result = subprocess.run(command, capture_output=True, text=True)
             if result.returncode == 0:
@@ -559,6 +678,36 @@ class VideoCompressThread(QThread):
                     os.remove(output_path)
                 os.rename(temp_path, output_path)
                 shutil.copystat(input_path, output_path)
+                
+                # 检查临时文件的修改时间
+                temp_mtime = os.path.getmtime(temp_path)
+                if abs(original_mtime - temp_mtime) > 1:
+                    print(f"\n警告：文件修改时间不一致！")
+                    print(f"原始文件：{time.ctime(original_mtime)}")
+                    print(f"临时文件：{time.ctime(temp_mtime)}")
+                    print("取消覆盖操作")
+                    return False
+                
+                # 继续替换操作
+                if platform.system() == 'Windows' and os.path.exists(output_path):
+                    os.remove(output_path)
+                os.rename(temp_path, output_path)
+                
+                # 检查最终文件的修改时间
+                final_mtime = os.path.getmtime(output_path)
+                if abs(original_mtime - final_mtime) > 1:
+                    print(f"\n警告：最终文件修改时间不一致！")
+                    print(f"原始文件：{time.ctime(original_mtime)}")
+                    print(f"最终文件：{time.ctime(final_mtime)}")
+                    # 尝试修正时间
+                    os.utime(output_path, (os.path.getatime(input_path), original_mtime))
+                    
+                    # 最后检查
+                    if abs(original_mtime - os.path.getmtime(output_path)) > 1:
+                        print("无法修正文件时间，操作失败")
+                        return False
+                    print("文件时间已修正")
+                
                 return True
                 
             return False
