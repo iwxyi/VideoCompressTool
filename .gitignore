@@ -2,3 +2,8 @@
 *.json
 myenv/
 *.db
+*.app
+build/
+*.spec
+dist/
+*.dmg
