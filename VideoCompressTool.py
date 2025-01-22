@@ -13,11 +13,12 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QSize, QTimer
 )
-from PyQt6.QtGui import QColor, QPixmap
+from PyQt6.QtGui import QColor, QPixmap, QAction  # 从 QtGui 导入 QAction
 import platform
 import datetime
 import sqlite3  # 添加 sqlite3 导入
 import multiprocessing
+import sys
 
 
 """
@@ -1132,6 +1133,9 @@ class MainWindow(QMainWindow):
 
         # 用于存储当前的视频信息工作线程
         self.current_info_worker = None
+
+        # 创建菜单栏
+        self.create_menus()
 
     def init_methods(self):
         """初始化所有需要的方法"""
@@ -2371,6 +2375,96 @@ class MainWindow(QMainWindow):
                 self.compress_thread.update_cpu_cores(new_value)
         except Exception as e:
             print(f"保存 CPU 核心数设置失败：{e}")
+
+    def create_menus(self):
+        """创建菜单栏"""
+        menubar = self.menuBar()
+        
+        # 文件菜单
+        file_menu = menubar.addMenu('文件')
+        
+        # 打开文件夹
+        open_folder_action = QAction('打开文件夹', self)
+        open_folder_action.setShortcut('Ctrl+O')
+        open_folder_action.triggered.connect(self.select_source_folder)
+        file_menu.addAction(open_folder_action)
+        
+        # 打开数据路径
+        open_data_path_action = QAction('打开数据路径', self)
+        open_data_path_action.triggered.connect(self.open_data_path)
+        file_menu.addAction(open_data_path_action)
+        
+        # 选择菜单
+        select_menu = menubar.addMenu('选择')
+        
+        # 全部展开
+        expand_all_action = QAction('全部展开', self)
+        expand_all_action.triggered.connect(self.expand_all)
+        select_menu.addAction(expand_all_action)
+        
+        # 全部折叠
+        collapse_all_action = QAction('全部折叠', self)
+        collapse_all_action.triggered.connect(self.collapse_all)
+        select_menu.addAction(collapse_all_action)
+        
+        # 添加分割线
+        select_menu.addSeparator()
+        
+        # 全选
+        select_all_action = QAction('全选', self)
+        select_all_action.setShortcut('Ctrl+A')
+        select_all_action.triggered.connect(self.select_all)
+        select_menu.addAction(select_all_action)
+        
+        # 反选
+        invert_selection_action = QAction('反选', self)
+        invert_selection_action.triggered.connect(self.invert_selection)
+        select_menu.addAction(invert_selection_action)
+
+    def open_data_path(self):
+        """打开数据文件所在路径"""
+        data_path = os.path.dirname(os.path.abspath(self.settings_file))
+        if sys.platform == 'win32':
+            os.startfile(data_path)
+        elif sys.platform == 'darwin':  # macOS
+            subprocess.run(['open', data_path])
+        else:  # linux
+            subprocess.run(['xdg-open', data_path])
+
+    def expand_all(self):
+        """展开所有节点"""
+        self.tree.expandAll()
+
+    def collapse_all(self):
+        """折叠所有节点"""
+        self.tree.collapseAll()
+
+    def select_all(self):
+        """全选所有项目"""
+        def set_check_state(item, state):
+            item.setCheckState(0, state)
+            for i in range(item.childCount()):
+                set_check_state(item.child(i), state)
+        
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            set_check_state(root.child(i), Qt.Checked)
+
+    def invert_selection(self):
+        """反选所有项目"""
+        def invert_check_state(item):
+            # 如果是文件项目（没有子项）
+            if item.childCount() == 0:
+                current_state = item.checkState(0)
+                new_state = Qt.Unchecked if current_state == Qt.Checked else Qt.Checked
+                item.setCheckState(0, new_state)
+            # 如果是文件夹，递归处理子项
+            for i in range(item.childCount()):
+                invert_check_state(item.child(i))
+        
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            invert_check_state(root.child(i))
 
 def format_size(size_in_bytes):
     """格式化文件大小显示"""
