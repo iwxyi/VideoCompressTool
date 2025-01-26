@@ -2416,6 +2416,12 @@ class MainWindow(QMainWindow):
         select_all_action.triggered.connect(self.select_all)
         select_menu.addAction(select_all_action)
         
+        # 取消选择
+        deselect_all_action = QAction('取消选择', self)
+        deselect_all_action.setShortcut('Ctrl+D')  # 添加快捷键
+        deselect_all_action.triggered.connect(self.deselect_all)
+        select_menu.addAction(deselect_all_action)
+        
         # 反选
         invert_selection_action = QAction('反选', self)
         invert_selection_action.triggered.connect(self.invert_selection)
@@ -2448,7 +2454,7 @@ class MainWindow(QMainWindow):
         
         root = self.tree.invisibleRootItem()
         for i in range(root.childCount()):
-            set_check_state(root.child(i), Qt.Checked)
+            set_check_state(root.child(i), Qt.CheckState.Checked)
 
     def invert_selection(self):
         """反选所有项目"""
@@ -2456,7 +2462,7 @@ class MainWindow(QMainWindow):
             # 如果是文件项目（没有子项）
             if item.childCount() == 0:
                 current_state = item.checkState(0)
-                new_state = Qt.Unchecked if current_state == Qt.Checked else Qt.Checked
+                new_state = Qt.CheckState.Unchecked if current_state == Qt.CheckState.Checked else Qt.CheckState.Checked
                 item.setCheckState(0, new_state)
             # 如果是文件夹，递归处理子项
             for i in range(item.childCount()):
@@ -2465,6 +2471,18 @@ class MainWindow(QMainWindow):
         root = self.tree.invisibleRootItem()
         for i in range(root.childCount()):
             invert_check_state(root.child(i))
+
+    # 添加取消选择的方法
+    def deselect_all(self):
+        """取消选择所有项目"""
+        def set_check_state(item, state):
+            item.setCheckState(0, state)
+            for i in range(item.childCount()):
+                set_check_state(item.child(i), state)
+        
+        root = self.tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            set_check_state(root.child(i), Qt.CheckState.Unchecked)
 
 def format_size(size_in_bytes):
     """格式化文件大小显示"""
