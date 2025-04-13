@@ -2309,6 +2309,8 @@ class MainWindow(QMainWindow):
             total_size_str = format_size(total_size)
             self.video_info_label.setText(f"文件夹: {folder_name} | 包含视频: {video_count} 个 | 总大小: {total_size_str}")
             return
+        else:
+            self.video_info_label.setText("")
             
         # 如果是视频文件，显示视频信息
         file_path = current_item.data(0, Qt.ItemDataRole.UserRole)
