@@ -1121,10 +1121,12 @@ class MainWindow(QMainWindow):
         
         # 创建状态栏的标签
         self.video_info_label = QLabel()
+        self.processing_label = QLabel()  # 新增：处理进度标签
         self.selection_info_label = QLabel()
         
         # 添加标签到状态栏
-        self.statusBar.addWidget(self.video_info_label)
+        self.statusBar.addWidget(self.video_info_label, 1)  # 设置拉伸因子为1
+        self.statusBar.addWidget(self.processing_label, 2)  # 设置拉伸因子为2，使其占据更多空间
         self.statusBar.addPermanentWidget(self.selection_info_label)
         
         # 连接树形控件的选择变化信号
@@ -1691,6 +1693,14 @@ class MainWindow(QMainWindow):
         if not self.source_folder:
             return
         
+        # 重置压缩统计信息
+        self.compression_stats = {
+            'processed_count': 0,
+            'original_total_size': 0,
+            'compressed_total_size': 0,
+            'current_file': ''
+        }
+        
         # 更新选中文件的状态为"等待压缩"
         def update_selected_items(item):
             if item.checkState(0) != Qt.CheckState.Unchecked:  # 处理选中和部分选中的项目
@@ -1848,14 +1858,52 @@ class MainWindow(QMainWindow):
         # 当压缩完成时保存历史记录
         if data["status"] in ["完成", "完成(属性复制失败)"]:
             self.save_compression_history(file_path, history_data)
+        
+        # 更新状态栏中的处理进度
+        if data.get("status", "").startswith("正在压缩") or data.get("status") == "计算SSIM中":
+            # 获取相对路径
+            try:
+                rel_path = os.path.relpath(file_path, self.source_folder)
+                self.compression_stats['current_file'] = rel_path
+                progress_text = data["status"]
+                self.processing_label.setText(f"正在处理: {rel_path} | {progress_text}")
+            except Exception as e:
+                # 如果获取相对路径失败，回退到使用文件名
+                file_name = os.path.basename(file_path)
+                self.processing_label.setText(f"正在处理: {file_name} | {data['status']}")
+        
+        # 当一个文件处理完成时，更新统计信息
+        if data.get("status") in ["完成", "完成(属性复制失败)"]:
+            self.compression_stats['processed_count'] += 1
+            if "original_size" in data:
+                self.compression_stats['original_total_size'] += data["original_size"]
+            if "compressed_size" in data:
+                self.compression_stats['compressed_total_size'] += data["compressed_size"]
 
     def compression_finished(self):
         """压缩完成后的处理"""
         self.source_path_button.setEnabled(True)
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
-        # 移除文件夹刷新
-        # self.update_file_list()
+        
+        # 显示最终统计信息
+        if self.compression_stats['processed_count'] > 0:
+            original_size = format_size(self.compression_stats['original_total_size'])
+            compressed_size = format_size(self.compression_stats['compressed_total_size'])
+            ratio = (self.compression_stats['compressed_total_size'] / self.compression_stats['original_total_size'] * 100) if self.compression_stats['original_total_size'] > 0 else 0
+            
+            final_message = f"已压缩 {self.compression_stats['processed_count']} 个视频，{original_size} -> {compressed_size} ({ratio:.1f}%)"
+            self.processing_label.setText(final_message)
+        else:
+            self.processing_label.setText("")
+        
+        # 重置统计信息
+        self.compression_stats = {
+            'processed_count': 0,
+            'original_total_size': 0,
+            'compressed_total_size': 0,
+            'current_file': ''
+        }
 
     def closeEvent(self, event):
         """程序关闭时的处理"""
